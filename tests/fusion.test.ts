@@ -15,6 +15,11 @@ import {
   buildRewritePrompt,
   buildWorkerArgs,
   buildWorkerPrompt,
+  buildGoaGraph,
+  buildGoaSTPrompt,
+  buildGoaTSPrompt,
+  buildGoaPoolingPrompt,
+  formatGoaReferenceDescriptions,
   chunkUtf8,
   collectRecentConversation,
   consumeNextTurnFusion,
@@ -83,7 +88,7 @@ describe("buildWorkerArgs", () => {
 });
 
 describe("settings", () => {
-  it("resolves flags with clamped numeric values", () => {
+  it("resolves flags with clamped numeric values and GoA options", () => {
     const settings = resolveSettings({
       "fusion-workers": "999",
       "fusion-output-bytes": "10",
@@ -95,6 +100,10 @@ describe("settings", () => {
       "fusion-discovery-thinking": "low",
       "fusion-worker-thinking": "high",
       "fusion-synthesis-thinking": "xhigh",
+      "fusion-goa": true,
+      "fusion-goa-rounds": "2",
+      "fusion-goa-threshold": "0.1",
+      "fusion-goa-top-k": "4",
     });
 
     assert.equal(settings.workerCount, 8);
@@ -107,6 +116,10 @@ describe("settings", () => {
     assert.equal(settings.discoveryThinking, "low");
     assert.equal(settings.workerThinking, "high");
     assert.equal(settings.synthesisThinking, "xhigh");
+    assert.equal(settings.goaEnabled, true);
+    assert.equal(settings.goaRounds, 2);
+    assert.equal(settings.goaThreshold, 0.1);
+    assert.equal(settings.goaTopK, 4);
   });
 
   it("normalizes current/default and ignores invalid reasoning levels", () => {
@@ -674,5 +687,62 @@ describe("truncateUtf8", () => {
 
     assert.match(output, /pi-fusion truncated/);
     assert.doesNotThrow(() => Buffer.from(output, "utf8").toString("utf8"));
+  });
+});
+
+describe("Graph-of-Agents (GoA)", () => {
+  it("builds adjacency lists and prunes nodes below threshold or exceeding topK", () => {
+    const scores = [0.9, 0.8, 0.01, 0.6];
+    const graph = buildGoaGraph(scores, 0.05, 3);
+
+    // Selected nodes should be [0, 1, 3] (index 2 with score 0.01 is pruned)
+    assert.deepEqual(Object.keys(graph.scoreDict).sort(), ["0", "1", "3"]);
+
+    // Edges (source < target in rank order): (0 -> 1), (0 -> 3), (1 -> 3)
+    assert.deepEqual(graph.sourceEdges[0], [1, 3]);
+    assert.deepEqual(graph.sourceEdges[1], [3]);
+    assert.deepEqual(graph.targetEdges[1], [0]);
+    assert.deepEqual(graph.targetEdges[3], [0, 1]);
+  });
+
+  it("formats reference descriptions annotated with relevance weights", () => {
+    const responses = { 0: "High relevance plan", 1: "Low relevance plan" };
+    const text = formatGoaReferenceDescriptions([0, 1], [0.8, 0.2], responses);
+
+    assert.match(text, /Model #1 \(high relevance\):/);
+    assert.match(text, /High relevance plan/);
+    assert.match(text, /Model #2 \(low relevance\):/);
+    assert.match(text, /Low relevance plan/);
+  });
+
+  it("builds GoA message-passing and graph pooling prompts", () => {
+    const stPrompt = buildGoaSTPrompt({
+      task: "Solve math problem",
+      initialResponse: "Draft answer 1",
+      referenceDescriptions: "Model #2: Draft answer 2",
+    });
+    assert.match(stPrompt, /Refine your plan\/answer/);
+    assert.match(stPrompt, /Solve math problem/);
+    assert.match(stPrompt, /Draft answer 1/);
+
+    const tsPrompt = buildGoaTSPrompt({
+      task: "Solve math problem",
+      initialResponse: "Draft answer 1",
+      referenceDescriptions: "Model #2: Refined answer 2",
+    });
+    assert.match(tsPrompt, /Other models refined their answers/);
+    assert.match(tsPrompt, /Refined answer 2/);
+
+    const poolingPrompt = buildGoaPoolingPrompt({
+      originalText: "Solve math problem",
+      discoveryContext: "Loaded equations",
+      responses: { 0: "Final answer 1", 1: "Final answer 2" },
+      scoreDict: { 0: 0.95, 1: 0.5 },
+      imageCount: 0,
+    });
+    assert.match(poolingPrompt, new RegExp(SYNTHESIS_PROMPT_MARKER));
+    assert.match(poolingPrompt, /Graph-of-Agents \(GoA\) planning bundle/);
+    assert.match(poolingPrompt, /Model #1 \(high relevance, score: 0\.95\):/);
+    assert.match(poolingPrompt, /Final answer 1/);
   });
 });

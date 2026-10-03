@@ -150,7 +150,20 @@ const PICKER_PANE_MAX_HEIGHT = 26;
 
 class FusionPane {
   private selected = 0;
-  private readonly rows = ["enabled", "tools", "presets", "workers", "discovery", "rewrite", "synthesis", "save"] as const;
+  private readonly rows = [
+    "enabled",
+    "goa",
+    "goaRounds",
+    "goaThreshold",
+    "goaTopK",
+    "tools",
+    "presets",
+    "workers",
+    "discovery",
+    "rewrite",
+    "synthesis",
+    "save",
+  ] as const;
 
   constructor(
     private readonly theme: Theme,
@@ -190,6 +203,7 @@ class FusionPane {
     }
     if (matchesKey(data, "space")) {
       if (row === "enabled") this.toggleEnabled();
+      else if (row === "goa") this.settings.goaEnabled = !this.settings.goaEnabled;
       else if (row === "tools") this.settings.plannerToolMode = togglePlannerToolMode(this.settings.plannerToolMode);
       else if (row === "discovery") this.settings.discoveryEnabled = !this.settings.discoveryEnabled;
       else if (row === "rewrite") this.settings.rewriteEnabled = !this.settings.rewriteEnabled;
@@ -216,6 +230,14 @@ class FusionPane {
       : th.fg("muted", "off");
     const rows = [
       this.renderSettingRow("enabled", "Next turn", this.settings.enabled ? th.fg("success", "armed") : th.fg("muted", "off"), "space arm/disarm"),
+      this.renderSettingRow("goa", "Graph-of-Agents", this.settings.goaEnabled ? th.fg("success", "on") : th.fg("muted", "off"), "space on/off"),
+      ...(this.settings.goaEnabled
+        ? [
+            this.renderSettingRow("goaRounds", "GoA rounds", String(this.settings.goaRounds), "←/→ adjust (1-5)"),
+            this.renderSettingRow("goaThreshold", "GoA threshold", this.settings.goaThreshold.toFixed(2), "←/→ adjust (0.00-1.00)"),
+            this.renderSettingRow("goaTopK", "GoA top-k", String(this.settings.goaTopK), "←/→ adjust (1-8)"),
+          ]
+        : []),
       this.renderSettingRow(
         "tools",
         "Agent tools",
@@ -254,6 +276,14 @@ class FusionPane {
   private adjust(row: (typeof this.rows)[number], delta: -1 | 1): void {
     if (row === "enabled") {
       this.toggleEnabled();
+    } else if (row === "goa") {
+      this.settings.goaEnabled = !this.settings.goaEnabled;
+    } else if (row === "goaRounds") {
+      this.settings.goaRounds = Math.max(1, Math.min(5, this.settings.goaRounds + delta));
+    } else if (row === "goaThreshold") {
+      this.settings.goaThreshold = Math.max(0, Math.min(1, Math.round((this.settings.goaThreshold + delta * 0.05) * 100) / 100));
+    } else if (row === "goaTopK") {
+      this.settings.goaTopK = Math.max(1, Math.min(8, this.settings.goaTopK + delta));
     } else if (row === "presets") {
       return;
     } else if (row === "workers") {

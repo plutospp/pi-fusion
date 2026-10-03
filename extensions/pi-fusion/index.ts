@@ -12,6 +12,11 @@ import {
   buildRewritePrompt,
   buildWorkerArgs,
   buildWorkerPrompt,
+  buildGoaGraph,
+  buildGoaSTPrompt,
+  buildGoaTSPrompt,
+  buildGoaPoolingPrompt,
+  formatGoaReferenceDescriptions,
   collectRecentConversation,
   consumeNextTurnFusion,
   createFusionRunId,
@@ -308,6 +313,10 @@ function settingsFromFlags(pi: ExtensionAPI, persisted?: PersistedFusionSettings
     "fusion-synthesis-thinking": pi.getFlag("fusion-synthesis-thinking"),
     "fusion-planner-tools": pi.getFlag("fusion-planner-tools"),
     "fusion-preset": pi.getFlag("fusion-preset"),
+    "fusion-goa": pi.getFlag("fusion-goa"),
+    "fusion-goa-rounds": pi.getFlag("fusion-goa-rounds"),
+    "fusion-goa-threshold": pi.getFlag("fusion-goa-threshold"),
+    "fusion-goa-top-k": pi.getFlag("fusion-goa-top-k"),
   };
   return resolveSettings(flags, persisted);
 }
@@ -329,6 +338,10 @@ function settingsSummary(settings: FusionSettings): string {
     `synthesisModel=${settings.synthesisModel ?? "current"}`,
     `synthesisThinking=${settings.synthesisThinking ?? "current"}`,
     `plannerTools=${settings.plannerToolMode}`,
+    `goa=${settings.goaEnabled}`,
+    `goaRounds=${settings.goaRounds}`,
+    `goaThreshold=${settings.goaThreshold}`,
+    `goaTopK=${settings.goaTopK}`,
     `preset=${settings.preset ?? "none"}`,
   ].join(" ");
 }
@@ -459,6 +472,26 @@ export default function piFusion(pi: ExtensionAPI): void {
     type: "string",
     default: "",
   });
+  pi.registerFlag("fusion-goa", {
+    description: "Enable Graph-of-Agents (GoA) message passing graph architecture",
+    type: "boolean",
+    default: false,
+  });
+  pi.registerFlag("fusion-goa-rounds", {
+    description: "Number of GoA message passing rounds (default 1)",
+    type: "string",
+    default: String(DEFAULT_SETTINGS.goaRounds),
+  });
+  pi.registerFlag("fusion-goa-threshold", {
+    description: "Minimum edge score threshold for GoA graph pruning (default 0.05)",
+    type: "string",
+    default: String(DEFAULT_SETTINGS.goaThreshold),
+  });
+  pi.registerFlag("fusion-goa-top-k", {
+    description: "Max top-k nodes to connect in GoA graph (default 3)",
+    type: "string",
+    default: String(DEFAULT_SETTINGS.goaTopK),
+  });
 
   function persist(): void {
     pi.appendEntry("pi-fusion-settings", settings);
@@ -575,12 +608,20 @@ export default function piFusion(pi: ExtensionAPI): void {
         settings.synthesisModel = resolveSettings({ "fusion-synthesis-model": value }, settings).synthesisModel;
       } else if (command === "synthesis-thinking" || command === "synthesis-reasoning") {
         settings.synthesisThinking = resolveSettings({ "fusion-synthesis-thinking": value }, settings).synthesisThinking;
+      } else if (command === "goa") {
+        settings.goaEnabled = value.toLowerCase() === "on" || value.toLowerCase() === "true" || value.toLowerCase() === "1";
+      } else if (command === "goa-rounds") {
+        settings.goaRounds = resolveSettings({ "fusion-goa-rounds": value }, settings).goaRounds;
+      } else if (command === "goa-threshold") {
+        settings.goaThreshold = resolveSettings({ "fusion-goa-threshold": value }, settings).goaThreshold;
+      } else if (command === "goa-top-k") {
+        settings.goaTopK = resolveSettings({ "fusion-goa-top-k": value }, settings).goaTopK;
       } else if (command === "preset") {
         const ok = await handlePresetCommand(value, ctx);
         if (!ok) return;
       } else {
         ctx.ui.notify(
-          "Usage: /fusion [ui|status|on|off|preset [list|save NAME|save-project NAME|NAME]|discovery on|off|rewrite on|off|tools all|read-only|workers N|discovery-model SPEC|discovery-thinking LEVEL|worker-model SPEC|worker-thinking LEVEL|synthesis-model SPEC|synthesis-thinking LEVEL|output BYTES|context BYTES|resume BYTES|timeout MS]",
+          "Usage: /fusion [ui|status|on|off|goa on|off|goa-rounds N|goa-threshold FLOAT|goa-top-k N|preset [list|save NAME|save-project NAME|NAME]|discovery on|off|rewrite on|off|tools all|read-only|workers N|discovery-model SPEC|discovery-thinking LEVEL|worker-model SPEC|worker-thinking LEVEL|synthesis-model SPEC|synthesis-thinking LEVEL|output BYTES|context BYTES|resume BYTES|timeout MS]",
           "info",
         );
         return;
@@ -797,6 +838,130 @@ export default function piFusion(pi: ExtensionAPI): void {
       const workerResults = await Promise.all(workerPromises);
       if (abort.signal.aborted) return undefined;
 
+      let finalSynthesisPrompt = "";
+
+      if (settings.goaEnabled) {
+        // GoA Graph Construction & Bidirectional Message Passing Loop
+        const nodeResponses: Record<number, string> = {};
+        for (let i = 0; i < workerResults.length; i++) {
+          nodeResponses[i] = workerResults[i]?.output ?? "";
+        }
+
+        // Generate synthetic or heuristic node relevance scores based on worker output lengths & ok statuses
+        const scores = workerResults.map((r) => (r.ok ? Math.min(1.0, Math.max(0.2, r.output.length / 500)) : 0));
+        const graph = buildGoaGraph(scores, settings.goaThreshold, settings.goaTopK);
+
+        for (let round = 1; round <= settings.goaRounds; round++) {
+          if (abort.signal.aborted) return undefined;
+
+          // Phase 1: S -> T (Target refinement pass)
+          const sortedTargets = Object.keys(graph.targetEdges)
+            .map(Number)
+            .sort((a, b) => a - b);
+          if (sortedTargets.length > 0) {
+            const stPromises = sortedTargets.map(async (target) => {
+              const sources = graph.targetEdges[target] ?? [];
+              const sourceScores = sources.map((s) => graph.scoreDict[s] ?? 0.5);
+              const totalScore = sourceScores.reduce((a, b) => a + b, 0) || 1;
+              const sourceWeights = sourceScores.map((s) => s / totalScore);
+
+              const refDescs = formatGoaReferenceDescriptions(sources, sourceWeights, nodeResponses);
+              const prompt = buildGoaSTPrompt({
+                task,
+                initialResponse: nodeResponses[target] ?? "",
+                referenceDescriptions: refDescs,
+                template: prompts.goaST,
+              });
+
+              return runWorker({
+                prompt,
+                cwd: ctx.cwd,
+                index: target,
+                lens: `#${target + 1} (GoA R${round} S->T)`,
+                timeoutMs: settings.timeoutMs,
+                model: resolveWorkerModel(settings, target, currentModel),
+                thinkingLevel: resolveWorkerThinking(settings, target, pi.getThinkingLevel()),
+                tools: plannerToolsForMode(settings),
+                signal: abort.signal,
+                onLiveUpdate: (idx, patch) => activePanel?.update(idx, patch),
+              });
+            });
+
+            const stResults = await Promise.all(stPromises);
+            for (const res of stResults) {
+              if (res.ok) nodeResponses[res.index] = res.output;
+            }
+          }
+
+          if (abort.signal.aborted) return undefined;
+
+          // Phase 2: T -> S (Source update pass)
+          const sortedSources = Object.keys(graph.sourceEdges)
+            .map(Number)
+            .sort((a, b) => a - b);
+          if (sortedSources.length > 0) {
+            const tsPromises = sortedSources.map(async (source) => {
+              const targets = graph.sourceEdges[source] ?? [];
+              const targetScores = targets.map((t) => graph.scoreDict[t] ?? 0.5);
+              const totalScore = targetScores.reduce((a, b) => a + b, 0) || 1;
+              const targetWeights = targetScores.map((t) => t / totalScore);
+
+              const refDescs = formatGoaReferenceDescriptions(targets, targetWeights, nodeResponses);
+              const prompt = buildGoaTSPrompt({
+                task,
+                initialResponse: nodeResponses[source] ?? "",
+                referenceDescriptions: refDescs,
+                template: prompts.goaTS,
+              });
+
+              return runWorker({
+                prompt,
+                cwd: ctx.cwd,
+                index: source,
+                lens: `#${source + 1} (GoA R${round} T->S)`,
+                timeoutMs: settings.timeoutMs,
+                model: resolveWorkerModel(settings, source, currentModel),
+                thinkingLevel: resolveWorkerThinking(settings, source, pi.getThinkingLevel()),
+                tools: plannerToolsForMode(settings),
+                signal: abort.signal,
+                onLiveUpdate: (idx, patch) => activePanel?.update(idx, patch),
+              });
+            });
+
+            const tsResults = await Promise.all(tsPromises);
+            for (const res of tsResults) {
+              if (res.ok) nodeResponses[res.index] = res.output;
+            }
+          }
+        }
+
+        // Update workerResults outputs with final GoA responses
+        for (let i = 0; i < workerResults.length; i++) {
+          if (nodeResponses[i] !== undefined) {
+            workerResults[i].output = nodeResponses[i];
+          }
+        }
+
+        finalSynthesisPrompt = buildGoaPoolingPrompt({
+          originalText: task,
+          discoveryContext,
+          responses: nodeResponses,
+          scoreDict: graph.scoreDict,
+          imageCount,
+          template: prompts.goaPooling,
+        });
+      } else {
+        finalSynthesisPrompt = buildSynthesisPrompt({
+          originalText: task,
+          discoveryContext,
+          promptVariations: settings.rewriteEnabled ? promptVariations : [],
+          workerResults,
+          workerOutputBytes: settings.workerOutputBytes,
+          imageCount,
+          template: prompts.synthesis,
+        });
+      }
+
       // Persist the full, untruncated sub-agent transcript as non-context
       // `custom` archive entries before synthesis. These stay in the session
       // file for audit/resume but are never fed back to the LLM.
@@ -825,15 +990,7 @@ export default function piFusion(pi: ExtensionAPI): void {
       if (settings.synthesisThinking) pi.setThinkingLevel(settings.synthesisThinking);
 
       return {
-        synthesisPrompt: buildSynthesisPrompt({
-          originalText: task,
-          discoveryContext,
-          promptVariations: settings.rewriteEnabled ? promptVariations : [],
-          workerResults,
-          workerOutputBytes: settings.workerOutputBytes,
-          imageCount,
-          template: prompts.synthesis,
-        }),
+        synthesisPrompt: finalSynthesisPrompt,
         traceMessage: buildFusionTraceMessage({
           task,
           discoveryEnabled: settings.discoveryEnabled,

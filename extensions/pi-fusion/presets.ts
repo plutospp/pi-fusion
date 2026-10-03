@@ -35,6 +35,9 @@ interface FusionPresetFile {
     synthesis?: string;
     // TODO(2026-07-17): remove legacy "actor" prompt key once configs have migrated to "synthesis".
     actor?: string;
+    goaST?: string;
+    goaTS?: string;
+    goaPooling?: string;
   };
 }
 
@@ -82,6 +85,10 @@ export function snapshotFusionSettings(settings: FusionSettings): PersistedFusio
     workerThinking: settings.workerThinking,
     synthesisThinking: settings.synthesisThinking,
     plannerToolMode: settings.plannerToolMode,
+    goaEnabled: settings.goaEnabled,
+    goaRounds: settings.goaRounds,
+    goaThreshold: settings.goaThreshold,
+    goaTopK: settings.goaTopK,
   };
 }
 
@@ -191,6 +198,9 @@ export async function loadFusionPrompts(cwd: string): Promise<FusionPrompts> {
     prompts.worker = file.prompts?.worker ?? prompts.worker;
     // TODO(2026-07-17): drop the file.prompts?.actor fallback once configs have migrated to "synthesis".
     prompts.synthesis = file.prompts?.synthesis ?? file.prompts?.actor ?? prompts.synthesis;
+    prompts.goaST = file.prompts?.goaST ?? prompts.goaST;
+    prompts.goaTS = file.prompts?.goaTS ?? prompts.goaTS;
+    prompts.goaPooling = file.prompts?.goaPooling ?? prompts.goaPooling;
   }
 
   return prompts;
