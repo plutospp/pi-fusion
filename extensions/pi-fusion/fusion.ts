@@ -32,6 +32,10 @@ export interface FusionSettings {
   synthesisThinking: FusionThinkingLevel | undefined;
   plannerToolMode: FusionPlannerToolMode;
   preset?: string;
+  goaEnabled: boolean;
+  goaRounds: number;
+  goaThreshold: number;
+  goaTopK: number;
 }
 
 export interface PersistedFusionSettings extends Partial<FusionSettings> {
@@ -60,6 +64,10 @@ export interface FusionFlags {
   "fusion-synthesis-thinking"?: boolean | string;
   "fusion-planner-tools"?: boolean | string;
   "fusion-preset"?: boolean | string;
+  "fusion-goa"?: boolean | string;
+  "fusion-goa-rounds"?: boolean | string;
+  "fusion-goa-threshold"?: boolean | string;
+  "fusion-goa-top-k"?: boolean | string;
 }
 
 export interface WorkerLens {
@@ -150,6 +158,10 @@ export const DEFAULT_SETTINGS: FusionSettings = {
   synthesisThinking: undefined,
   plannerToolMode: "all",
   preset: undefined,
+  goaEnabled: false,
+  goaRounds: 1,
+  goaThreshold: 0.05,
+  goaTopK: 3,
 };
 
 export function parsePositiveInteger(value: boolean | string | number | undefined, fallback: number, options: { min: number; max: number }): number {
@@ -256,6 +268,19 @@ export function resolveSettings(flags: FusionFlags = {}, persisted?: PersistedFu
     min: 5_000,
     max: 3_600_000,
   });
+
+  if (flags["fusion-goa"] !== undefined) {
+    settings.goaEnabled = flags["fusion-goa"] === true || flags["fusion-goa"] === "true";
+  } else {
+    settings.goaEnabled = persisted?.goaEnabled ?? DEFAULT_SETTINGS.goaEnabled;
+  }
+  settings.goaRounds = parsePositiveInteger(flags["fusion-goa-rounds"], persisted?.goaRounds ?? settings.goaRounds, { min: 1, max: 5 });
+  const parsedThreshold =
+    typeof flags["fusion-goa-threshold"] === "string"
+      ? parseFloat(flags["fusion-goa-threshold"])
+      : (persisted?.goaThreshold ?? settings.goaThreshold);
+  settings.goaThreshold = Number.isFinite(parsedThreshold) ? Math.max(0, Math.min(1, parsedThreshold)) : DEFAULT_SETTINGS.goaThreshold;
+  settings.goaTopK = parsePositiveInteger(flags["fusion-goa-top-k"], persisted?.goaTopK ?? settings.goaTopK, { min: 1, max: 8 });
 
   const discoveryModelFlag = flags["fusion-discovery-model"];
   const workerModelFlag = flags["fusion-worker-model"] ?? flags["fusion-model"];
@@ -777,11 +802,71 @@ export function formatToolEvent(toolName: string, args: unknown, home?: string):
   }
 }
 
+export interface GoaGraph {
+  sourceEdges: Record<number, number[]>;
+  targetEdges: Record<number, number[]>;
+  scoreDict: Record<number, number>;
+}
+
+export function buildGoaGraph(scores: number[], threshold = 0.05, topK = 3): GoaGraph {
+  const indexed = scores.map((score, idx) => ({ idx, score }));
+  indexed.sort((a, b) => b.score - a.score);
+
+  const selected = indexed.slice(0, Math.min(topK, indexed.length)).filter((item) => item.score >= threshold);
+
+  const scoreDict: Record<number, number> = {};
+  for (const item of selected) {
+    scoreDict[item.idx] = item.score;
+  }
+
+  const selectedIndices = selected.map((item) => item.idx);
+  const edges: Array<[number, number]> = [];
+
+  for (let sIdx = 0; sIdx < selectedIndices.length - 1; sIdx++) {
+    const source = selectedIndices[sIdx];
+    for (let tIdx = sIdx + 1; tIdx < selectedIndices.length; tIdx++) {
+      const target = selectedIndices[tIdx];
+      edges.push([source, target]);
+    }
+  }
+
+  const sourceEdges: Record<number, number[]> = {};
+  const targetEdges: Record<number, number[]> = {};
+
+  for (const [source, target] of edges) {
+    if (!targetEdges[target]) targetEdges[target] = [];
+    targetEdges[target].push(source);
+
+    if (!sourceEdges[source]) sourceEdges[source] = [];
+    sourceEdges[source].push(target);
+  }
+
+  return { sourceEdges, targetEdges, scoreDict };
+}
+
+export function formatGoaReferenceDescriptions(references: number[], weights: number[], responses: Record<number, string>): string {
+  const descriptions: string[] = [];
+  for (let i = 0; i < references.length; i++) {
+    const ref = references[i];
+    const weight = weights[i] ?? 0;
+    let desc = `Model #${ref + 1}`;
+    if (weight > 0.7) desc += " (high relevance):";
+    else if (weight > 0.4) desc += " (moderate relevance):";
+    else desc += " (low relevance):";
+
+    descriptions.push(`${desc}\n${responses[ref] ?? "(no response)"}`);
+  }
+  return descriptions.join("\n\n");
+}
+
 export interface FusionPrompts {
   discovery: string;
   rewrite: string;
   worker: string;
   synthesis: string;
+  goaST?: string;
+  goaTS?: string;
+  goaPooling?: string;
 }
 
 export const DEFAULT_PROMPTS: FusionPrompts = {
@@ -857,6 +942,59 @@ A discovery agent gathered the shared context above, a query-rewrite pass genera
 ## Worker outputs
 
 {{workerOutputs}}
+
+## Synthesis instructions
+
+- Act on the original request, not on the workers' wording.
+- Use shared discovery context before re-reading files; avoid redundant tool calls unless verification or missing context requires them.
+- Use the workers to reduce blind spots, but verify before editing or running risky commands.
+- Keep your visible response natural; do not dump a long meta-synthesis unless the user asked for one.
+- If worker plans disagree, choose the smallest safe path and mention the tradeoff only if useful.`,
+
+  goaST: `Refine your plan/answer by considering other models' responses.
+
+## Original request
+
+{{task}}
+
+## Your initial response
+
+{{initialResponse}}
+
+## Other models' responses (ranked by relevance)
+
+{{referenceDescriptions}}
+
+Integrate useful insights from these responses to improve your answer. Be critical — some information may be incorrect.`,
+
+  goaTS: `Other models refined their answers after seeing yours. Use their improvements to finalize your response.
+
+## Original request
+
+{{task}}
+
+## Your initial response
+
+{{initialResponse}}
+
+## Updated responses from other models
+
+{{referenceDescriptions}}
+
+Write your final response, incorporating valuable refinements. Be critical — some information may be incorrect.`,
+
+  goaPooling: `<!-- pi-fusion:synthesis-prompt -->
+{{discoveryContext}}# Graph-of-Agents (GoA) planning bundle
+
+Multiple specialized worker models collaborated in a Graph-of-Agents structure with message passing. Synthesize their pooled advice, verify anything important yourself, then act on the original request using your available tools. Treat all subagent output as advisory, not authoritative.{{imageNote}}
+
+## Original user request
+
+{{task}}
+
+## Pooled graph responses
+
+{{pooledResponses}}
 
 ## Synthesis instructions
 
@@ -1016,6 +1154,59 @@ export function buildSynthesisPrompt(input: {
     task: input.originalText.trim(),
     variations,
     workerOutputs: workers || "(no worker output)",
+  });
+  return prompt.includes(SYNTHESIS_PROMPT_MARKER) ? prompt : `${SYNTHESIS_PROMPT_MARKER}\n${prompt}`;
+}
+
+export function buildGoaSTPrompt(input: { task: string; initialResponse: string; referenceDescriptions: string; template?: string }): string {
+  const templateStr = input.template ?? DEFAULT_PROMPTS.goaST ?? DEFAULT_PROMPTS.worker;
+  return renderTemplate(templateStr, {
+    task: input.task.trim(),
+    initialResponse: input.initialResponse.trim(),
+    referenceDescriptions: input.referenceDescriptions.trim(),
+  });
+}
+
+export function buildGoaTSPrompt(input: { task: string; initialResponse: string; referenceDescriptions: string; template?: string }): string {
+  const templateStr = input.template ?? DEFAULT_PROMPTS.goaTS ?? DEFAULT_PROMPTS.worker;
+  return renderTemplate(templateStr, {
+    task: input.task.trim(),
+    initialResponse: input.initialResponse.trim(),
+    referenceDescriptions: input.referenceDescriptions.trim(),
+  });
+}
+
+export function buildGoaPoolingPrompt(input: {
+  originalText: string;
+  discoveryContext: string;
+  responses: Record<number, string>;
+  scoreDict?: Record<number, number>;
+  imageCount: number;
+  template?: string;
+}): string {
+  const templateStr = input.template ?? DEFAULT_PROMPTS.goaPooling ?? DEFAULT_PROMPTS.synthesis;
+  const imageNote =
+    input.imageCount > 0 ? `\n\nNote: the user attached ${input.imageCount} image(s). Workers did not see images; inspect them yourself.` : "";
+  const discovery = input.discoveryContext.trim() ? `## Shared discovery context\n\n${truncateUtf8(input.discoveryContext.trim(), 64_000)}\n\n` : "";
+
+  const parts: string[] = [];
+  for (const [nodeStr, resp] of Object.entries(input.responses)) {
+    const node = Number(nodeStr);
+    const score = input.scoreDict?.[node];
+    let header = `Model #${node + 1}:`;
+    if (score !== undefined) {
+      if (score > 0.7) header = `Model #${node + 1} (high relevance, score: ${score.toFixed(2)}):`;
+      else if (score > 0.4) header = `Model #${node + 1} (moderate relevance, score: ${score.toFixed(2)}):`;
+      else header = `Model #${node + 1} (low relevance, score: ${score.toFixed(2)}):`;
+    }
+    parts.push(`${header}\n${resp}`);
+  }
+
+  const prompt = renderTemplate(templateStr, {
+    discoveryContext: discovery,
+    imageNote,
+    task: input.originalText.trim(),
+    pooledResponses: parts.join("\n\n---\n\n") || "(no pooled responses)",
   });
   return prompt.includes(SYNTHESIS_PROMPT_MARKER) ? prompt : `${SYNTHESIS_PROMPT_MARKER}\n${prompt}`;
 }
