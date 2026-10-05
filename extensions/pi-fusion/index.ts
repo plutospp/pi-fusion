@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
+  buildCriticPrompt,
   buildFusionArchiveEntries,
   buildSynthesisPrompt,
   buildDiscoveryPrompt,
@@ -22,6 +23,7 @@ import {
   FUSION_ARCHIVE_ENTRY_TYPE,
   FUSION_SUBAGENT_ENV,
   FUSION_TRACE_MESSAGE_TYPE,
+  getCriticLens,
   listFusionArchiveRuns,
   reconstructFusionArchive,
   fusionStatusGlyph,
@@ -30,6 +32,8 @@ import {
   normalizeWorkerSlots,
   parsePromptVariations,
   resolveSettings,
+  resolveCriticModel,
+  resolveCriticThinking,
   resolveWorkerModel,
   resolveWorkerThinking,
   shouldBypassFusion,
@@ -294,7 +298,9 @@ function settingsFromFlags(pi: ExtensionAPI, persisted?: PersistedFusionSettings
     "fusion-disabled": pi.getFlag("fusion-disabled"),
     "fusion-no-discovery": pi.getFlag("fusion-no-discovery"),
     "fusion-no-rewrite": pi.getFlag("fusion-no-rewrite"),
+    "fusion-no-critic": pi.getFlag("fusion-no-critic"),
     "fusion-workers": pi.getFlag("fusion-workers"),
+    "fusion-critics": pi.getFlag("fusion-critics"),
     "fusion-output-bytes": pi.getFlag("fusion-output-bytes"),
     "fusion-context-bytes": pi.getFlag("fusion-context-bytes"),
     "fusion-resume-bytes": pi.getFlag("fusion-resume-bytes"),
@@ -302,9 +308,11 @@ function settingsFromFlags(pi: ExtensionAPI, persisted?: PersistedFusionSettings
     "fusion-model": pi.getFlag("fusion-model"),
     "fusion-discovery-model": pi.getFlag("fusion-discovery-model"),
     "fusion-worker-model": pi.getFlag("fusion-worker-model"),
+    "fusion-critic-model": pi.getFlag("fusion-critic-model"),
     "fusion-synthesis-model": pi.getFlag("fusion-synthesis-model"),
     "fusion-discovery-thinking": pi.getFlag("fusion-discovery-thinking"),
     "fusion-worker-thinking": pi.getFlag("fusion-worker-thinking"),
+    "fusion-critic-thinking": pi.getFlag("fusion-critic-thinking"),
     "fusion-synthesis-thinking": pi.getFlag("fusion-synthesis-thinking"),
     "fusion-planner-tools": pi.getFlag("fusion-planner-tools"),
     "fusion-preset": pi.getFlag("fusion-preset"),
@@ -317,7 +325,9 @@ function settingsSummary(settings: FusionSettings): string {
     `armed=${settings.enabled}`,
     `discovery=${settings.discoveryEnabled}`,
     `rewrite=${settings.rewriteEnabled}`,
+    `critic=${settings.criticEnabled}`,
     `workers=${settings.workerCount}`,
+    `critics=${settings.criticCount}`,
     `workerOutputBytes=${settings.workerOutputBytes}`,
     `contextBytes=${settings.contextBytes}`,
     `resumeContextBytes=${settings.resumeContextBytes}`,
@@ -326,6 +336,8 @@ function settingsSummary(settings: FusionSettings): string {
     `discoveryThinking=${settings.discoveryThinking ?? "current"}`,
     `workerModel=${settings.workerModel ?? "current"}`,
     `workerThinking=${settings.workerThinking ?? "current"}`,
+    `criticModel=${settings.criticModel ?? "current"}`,
+    `criticThinking=${settings.criticThinking ?? "current"}`,
     `synthesisModel=${settings.synthesisModel ?? "current"}`,
     `synthesisThinking=${settings.synthesisThinking ?? "current"}`,
     `plannerTools=${settings.plannerToolMode}`,
@@ -389,10 +401,20 @@ export default function piFusion(pi: ExtensionAPI): void {
     type: "boolean",
     default: false,
   });
+  pi.registerFlag("fusion-no-critic", {
+    description: "Skip the critic stage (on by default)",
+    type: "boolean",
+    default: false,
+  });
   pi.registerFlag("fusion-workers", {
     description: "Number of parallel pi-fusion workers (1-8, default 3)",
     type: "string",
     default: String(DEFAULT_SETTINGS.workerCount),
+  });
+  pi.registerFlag("fusion-critics", {
+    description: "Number of parallel pi-fusion critics (1-8, default 2)",
+    type: "string",
+    default: String(DEFAULT_SETTINGS.criticCount),
   });
   pi.registerFlag("fusion-output-bytes", {
     description: "Max bytes from each worker inserted into the synthesis prompt",
@@ -429,8 +451,18 @@ export default function piFusion(pi: ExtensionAPI): void {
     type: "string",
     default: "current",
   });
+  pi.registerFlag("fusion-critic-model", {
+    description: "Model for fusion critics, or current/default",
+    type: "string",
+    default: "current",
+  });
   pi.registerFlag("fusion-synthesis-model", {
     description: "Model for the synthesis turn, or current/default",
+    type: "string",
+    default: "current",
+  });
+  pi.registerFlag("fusion-critic-thinking", {
+    description: "Reasoning effort for fusion critics: current/off/minimal/low/medium/high/xhigh",
     type: "string",
     default: "current",
   });
@@ -554,11 +586,14 @@ export default function piFusion(pi: ExtensionAPI): void {
       else if (command === "off") settings.enabled = false;
       else if (command === "discovery") settings.discoveryEnabled = value.toLowerCase() !== "off";
       else if (command === "rewrite") settings.rewriteEnabled = value.toLowerCase() !== "off";
+      else if (command === "critic") settings.criticEnabled = value.toLowerCase() !== "off";
       else if (command === "tools" || command === "planner-tools")
         settings.plannerToolMode = normalizePlannerToolMode(value, settings.plannerToolMode);
       else if (command === "workers") {
         settings.workerCount = resolveSettings({ "fusion-workers": value }, settings).workerCount;
         settings.workers = normalizeWorkerSlots(settings.workers, settings.workerCount);
+      } else if (command === "critics") {
+        settings.criticCount = resolveSettings({ "fusion-critics": value }, settings).criticCount;
       } else if (command === "output") settings.workerOutputBytes = resolveSettings({ "fusion-output-bytes": value }, settings).workerOutputBytes;
       else if (command === "context") settings.contextBytes = resolveSettings({ "fusion-context-bytes": value }, settings).contextBytes;
       else if (command === "resume" || command === "resume-bytes")
@@ -571,6 +606,9 @@ export default function piFusion(pi: ExtensionAPI): void {
         settings.workerModel = resolveSettings({ "fusion-worker-model": value }, settings).workerModel;
       else if (command === "worker-thinking" || command === "worker-reasoning") {
         settings.workerThinking = resolveSettings({ "fusion-worker-thinking": value }, settings).workerThinking;
+      } else if (command === "critic-model") settings.criticModel = resolveSettings({ "fusion-critic-model": value }, settings).criticModel;
+      else if (command === "critic-thinking" || command === "critic-reasoning") {
+        settings.criticThinking = resolveSettings({ "fusion-critic-thinking": value }, settings).criticThinking;
       } else if (command === "synthesis-model") {
         settings.synthesisModel = resolveSettings({ "fusion-synthesis-model": value }, settings).synthesisModel;
       } else if (command === "synthesis-thinking" || command === "synthesis-reasoning") {
@@ -580,7 +618,7 @@ export default function piFusion(pi: ExtensionAPI): void {
         if (!ok) return;
       } else {
         ctx.ui.notify(
-          "Usage: /fusion [ui|status|on|off|preset [list|save NAME|save-project NAME|NAME]|discovery on|off|rewrite on|off|tools all|read-only|workers N|discovery-model SPEC|discovery-thinking LEVEL|worker-model SPEC|worker-thinking LEVEL|synthesis-model SPEC|synthesis-thinking LEVEL|output BYTES|context BYTES|resume BYTES|timeout MS]",
+          "Usage: /fusion [ui|status|on|off|preset [list|save NAME|save-project NAME|NAME]|discovery on|off|rewrite on|off|critic on|off|tools all|read-only|workers N|critics N|discovery-model SPEC|discovery-thinking LEVEL|worker-model SPEC|worker-thinking LEVEL|critic-model SPEC|critic-thinking LEVEL|synthesis-model SPEC|synthesis-thinking LEVEL|output BYTES|context BYTES|resume BYTES|timeout MS]",
           "info",
         );
         return;
@@ -797,6 +835,62 @@ export default function piFusion(pi: ExtensionAPI): void {
       const workerResults = await Promise.all(workerPromises);
       if (abort.signal.aborted) return undefined;
 
+      let criticResults: WorkerResult[] | undefined;
+      if (settings.criticEnabled && settings.criticCount > 0) {
+        activePanel?.close();
+        activePanel = undefined;
+
+        const criticIndices = Array.from({ length: settings.criticCount }, (_, i) => i);
+        const criticStatusLines = criticIndices.map((_, index) => `○ critic ${index + 1}: ${getCriticLens(index).name}`);
+        setFusionStatus(ctx, criticStatusLines);
+
+        const criticStates: FusionLiveWorkerState[] = criticIndices.map((_, index) => ({
+          index,
+          label: getCriticLens(index).name,
+          lens: "critic",
+          status: "queued" as const,
+          output: "",
+          reasoning: "",
+          events: [],
+        }));
+        activePanel = startFusionLivePanel(ctx, criticStates, "LLM Fusion critics", cancelFusion);
+
+        const criticModel = resolveCriticModel(settings, currentModel);
+        const criticThinking = resolveCriticThinking(settings, pi.getThinkingLevel());
+
+        const criticPromises = criticIndices.map(async (index) => {
+          const lens = getCriticLens(index);
+          const prompt = buildCriticPrompt({
+            task,
+            recentContext,
+            workerResults,
+            workerOutputBytes: settings.workerOutputBytes,
+            cwd: ctx.cwd,
+            lens,
+            template: prompts.critic,
+          });
+          activePanel?.update(index, { status: "running" });
+          const result = await runWorker({
+            prompt,
+            cwd: ctx.cwd,
+            index,
+            lens: lens.name,
+            timeoutMs: settings.timeoutMs,
+            model: criticModel,
+            thinkingLevel: criticThinking,
+            tools: plannerToolsForMode(settings),
+            signal: abort.signal,
+            onLiveUpdate: (criticIndex, patch) => activePanel?.update(criticIndex, patch),
+          });
+          criticStatusLines[index] = `${result.ok ? "●" : "⊘"} critic ${index + 1}: ${lens.name}`;
+          setFusionStatus(ctx, criticStatusLines);
+          return result;
+        });
+
+        criticResults = await Promise.all(criticPromises);
+        if (abort.signal.aborted) return undefined;
+      }
+
       // Persist the full, untruncated sub-agent transcript as non-context
       // `custom` archive entries before synthesis. These stay in the session
       // file for audit/resume but are never fed back to the LLM.
@@ -806,10 +900,12 @@ export default function piFusion(pi: ExtensionAPI): void {
         task,
         discoveryEnabled: settings.discoveryEnabled,
         rewriteEnabled: settings.rewriteEnabled,
+        criticEnabled: settings.criticEnabled,
         promptVariations: settings.rewriteEnabled ? promptVariations : [],
         discoveryResult,
         rewriteResult,
         workerResults,
+        criticResults,
       });
       pi.appendEntry(FUSION_ARCHIVE_ENTRY_TYPE, archive.manifest);
       for (const chunk of archive.chunks) pi.appendEntry(FUSION_ARCHIVE_ENTRY_TYPE, chunk);
@@ -830,6 +926,7 @@ export default function piFusion(pi: ExtensionAPI): void {
           discoveryContext,
           promptVariations: settings.rewriteEnabled ? promptVariations : [],
           workerResults,
+          criticResults,
           workerOutputBytes: settings.workerOutputBytes,
           imageCount,
           template: prompts.synthesis,
@@ -838,10 +935,12 @@ export default function piFusion(pi: ExtensionAPI): void {
           task,
           discoveryEnabled: settings.discoveryEnabled,
           rewriteEnabled: settings.rewriteEnabled,
+          criticEnabled: settings.criticEnabled,
           promptVariations: settings.rewriteEnabled ? promptVariations : [],
           discoveryResult,
           rewriteResult,
           workerResults,
+          criticResults,
           runId,
           archiveChunks: archive.chunks.length,
           archiveBytes: archive.manifest.bytes,
