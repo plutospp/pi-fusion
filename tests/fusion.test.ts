@@ -28,6 +28,7 @@ import {
   listFusionArchiveRuns,
   normalizeWorkerSlots,
   parsePromptVariations,
+  planCriticStage,
   reconstructFusionArchive,
   resolveSettings,
   resolveCriticModel,
@@ -36,8 +37,10 @@ import {
   resolveWorkerThinking,
   shouldBypassFusion,
   truncateUtf8,
+  CRITIC_TOOLS,
   FUSION_ARCHIVE_ENTRY_TYPE,
   FUSION_TRACE_MESSAGE_TYPE,
+  MAX_CRITICS,
   type WorkerResult,
 } from "../extensions/pi-fusion/fusion.ts";
 
@@ -57,6 +60,23 @@ function worker(overrides: Partial<WorkerResult> = {}): WorkerResult {
     ...overrides,
   };
 }
+
+const LEGACY_SYNTHESIS_TEMPLATE = [
+  "<!-- pi-fusion:synthesis-prompt -->",
+  "# LLM Fusion planning bundle",
+  "",
+  "## Original user request",
+  "",
+  "{{task}}",
+  "",
+  "## Worker outputs",
+  "",
+  "{{workerOutputs}}",
+  "",
+  "## Synthesis instructions",
+  "",
+  "- Act on the original request.",
+].join("\n");
 
 describe("buildWorkerArgs", () => {
   it("runs sub-agents headless and stateless but keeps other extensions enabled", () => {
@@ -105,7 +125,7 @@ describe("settings", () => {
     });
 
     assert.equal(settings.workerCount, 8);
-    assert.equal(settings.criticCount, 8);
+    assert.equal(settings.criticCount, MAX_CRITICS);
     assert.equal(settings.workerOutputBytes, 1_000);
     assert.equal(settings.contextBytes, 0);
     assert.equal(settings.timeoutMs, 600_000);
@@ -117,6 +137,11 @@ describe("settings", () => {
     assert.equal(settings.workerThinking, "high");
     assert.equal(settings.criticThinking, "medium");
     assert.equal(settings.synthesisThinking, "xhigh");
+  });
+
+  it("defaults to one general critic and caps critics at MAX_CRITICS", () => {
+    assert.equal(resolveSettings({}).criticCount, 1);
+    assert.equal(resolveSettings({ "fusion-critics": "999" }).criticCount, MAX_CRITICS);
   });
 
   it("normalizes current/default and ignores invalid reasoning levels", () => {
@@ -348,21 +373,52 @@ describe("prompts", () => {
     assert.doesNotMatch(prompt, /mapper|planner|skeptic/);
   });
 
-  it("builds critic prompt with worker outputs and user task", () => {
-    const lens = getCriticLens(0);
-    const prompt = buildCriticPrompt({
-      task: "Implement feature X",
-      recentContext: "Recent conversation context",
-      workerResults: [worker({ output: "Plan for feature X" })],
-      workerOutputBytes: 12_000,
-      cwd: "/repo",
-      lens,
-    });
+  const criticBase = {
+    task: "Implement feature X",
+    recentContext: "",
+    discoveryContext: "DISCOVERY_FACTS",
+    promptVariations: ["Explore API"],
+    workerResults: [worker({ output: "Plan for feature X" })],
+    workerOutputBytes: 12_000,
+    cwd: "/repo",
+  };
 
-    assert.equal(lens.name, "Critic #1");
-    assert.match(prompt, /critic Critic #1/i);
-    assert.match(prompt, /Implement feature X/);
-    assert.match(prompt, /Plan for feature X/);
+  it("gives each critic a distinct focus and a clean name", () => {
+    const lenses = [0, 1, 2, 3].map((index) => getCriticLens(index, 4));
+    assert.deepEqual(
+      lenses.map((lens) => lens.name),
+      ["#1", "#2", "#3", "#4"],
+    );
+    assert.equal(new Set(lenses.map((lens) => lens.focus)).size, 4);
+    assert.equal(getCriticLens(0, 1).focus, "general");
+  });
+
+  it("builds grounded critic prompts that share a prefix and differ only in the role", () => {
+    const a = buildCriticPrompt({ ...criticBase, lens: getCriticLens(0, 2) });
+    const b = buildCriticPrompt({ ...criticBase, lens: getCriticLens(1, 2) });
+    assert.match(a, /You are critic #1 /);
+    assert.doesNotMatch(a, /critic Critic/);
+    assert.match(a, /DISCOVERY_FACTS/);
+    assert.match(a, /Explore API/);
+    assert.match(a, /Plan for feature X/);
+    assert.match(a, /read-only/i);
+    assert.match(a, /Do not invent issues/);
+    assert.notEqual(a, b);
+    assert.equal(a.slice(0, a.indexOf("## Your role")), b.slice(0, b.indexOf("## Your role")));
+  });
+
+  it("shows critics only completed worker outputs and names failed workers", () => {
+    const prompt = buildCriticPrompt({
+      ...criticBase,
+      workerResults: [
+        worker({ index: 0, lens: "#1", output: "GOOD_PLAN" }),
+        worker({ index: 1, lens: "#2", ok: false, timedOut: true, output: "(worker produced no final assistant output)" }),
+      ],
+      lens: getCriticLens(0, 1),
+    });
+    assert.match(prompt, /GOOD_PLAN/);
+    assert.doesNotMatch(prompt, /worker produced no final assistant output/);
+    assert.match(prompt, /Worker 2 \(#2\): timed out/);
   });
 
   it("builds synthesis prompt with bounded worker outputs, critic outputs, and image warning", () => {
@@ -401,6 +457,48 @@ describe("prompts", () => {
     assert.ok(prompt.indexOf(SYNTHESIS_PROMPT_MARKER) < prompt.indexOf("Custom synthesis prompt"));
   });
 
+  it("injects critic evaluations into synthesis templates that predate critics", () => {
+    const prompt = buildSynthesisPrompt({
+      originalText: "Implement feature",
+      discoveryContext: "",
+      promptVariations: [],
+      workerResults: [worker()],
+      criticResults: [worker({ lens: "correctness", output: "CRITIC_FINDING" })],
+      workerOutputBytes: 1_000,
+      imageCount: 0,
+      template: LEGACY_SYNTHESIS_TEMPLATE,
+    });
+    assert.match(prompt, /CRITIC_FINDING/);
+    assert.ok(prompt.indexOf("## Critic evaluations") < prompt.indexOf("## Synthesis instructions"));
+  });
+
+  it("adds no critic section to legacy templates when no critic ran", () => {
+    const prompt = buildSynthesisPrompt({
+      originalText: "Implement feature",
+      discoveryContext: "",
+      promptVariations: [],
+      workerResults: [worker()],
+      workerOutputBytes: 1_000,
+      imageCount: 0,
+      template: LEGACY_SYNTHESIS_TEMPLATE,
+    });
+    assert.doesNotMatch(prompt, /Critic evaluations/);
+  });
+
+  it("frames critic findings as claims to verify", () => {
+    const prompt = buildSynthesisPrompt({
+      originalText: "Implement feature",
+      discoveryContext: "",
+      promptVariations: [],
+      workerResults: [worker()],
+      criticResults: [worker({ lens: "risk", output: "RISK_FINDING" })],
+      workerOutputBytes: 1_000,
+      imageCount: 0,
+    });
+    assert.match(prompt, /claim to check/);
+    assert.match(prompt, /not independent evidence/);
+  });
+
   it("asks the rewrite model for exactly the configured number of prompts", () => {
     const prompt = buildRewritePrompt({ task: "Add tests", recentContext: "", workerCount: 4 });
     assert.match(prompt, /into 4 complementary exploration prompts/);
@@ -412,6 +510,28 @@ describe("prompts", () => {
     assert.deepEqual(parsePromptVariations('["a","b","c","d"]', 3, "fallback"), ["a", "b", "c"]);
     assert.deepEqual(parsePromptVariations("1. one\n2. two", 2, "fallback"), ["one", "two"]);
     assert.deepEqual(parsePromptVariations("", 2, "fallback"), ["fallback", "fallback"]);
+  });
+});
+
+describe("critic stage", () => {
+  it("skips critics when they are off or no worker completed", () => {
+    assert.deepEqual(planCriticStage({ criticEnabled: false, criticCount: 2 }, [worker()]), { run: false, reason: "off" });
+    assert.deepEqual(planCriticStage({ criticEnabled: true, criticCount: 2 }, [worker({ ok: false })]), {
+      run: false,
+      reason: "no completed workers",
+    });
+  });
+
+  it("plans one distinct lens per critic, capped at MAX_CRITICS", () => {
+    const plan = planCriticStage({ criticEnabled: true, criticCount: 8 }, [worker()]);
+    assert.equal(plan.run, true);
+    if (!plan.run) return;
+    assert.equal(plan.lenses.length, MAX_CRITICS);
+    assert.equal(new Set(plan.lenses.map((lens) => lens.focus)).size, MAX_CRITICS);
+  });
+
+  it("gives critics read-only tools", () => {
+    assert.ok(buildWorkerArgs({ promptFile: "/tmp/c.md", tools: CRITIC_TOOLS }).join(" ").includes("--tools read,grep,find,ls"));
   });
 });
 
@@ -447,6 +567,20 @@ describe("fusion trace", () => {
     assert.match(expanded, /Explore API/);
     assert.match(expanded, /plan A/);
     assert.match(expanded, /critique plan A/);
+  });
+
+  it("reports skipped and partial critic stages clearly", () => {
+    const base = {
+      task: "t",
+      discoveryEnabled: false,
+      rewriteEnabled: false,
+      criticEnabled: true,
+      promptVariations: [],
+    };
+    const skipped = buildFusionTraceMessage({ ...base, workerResults: [worker({ ok: false })], criticSkipReason: "no completed workers" });
+    assert.match(skipped.content, /critics skipped \(no completed workers\)/);
+    const partial = buildFusionTraceMessage({ ...base, workerResults: [worker()], criticResults: [worker({ ok: false }), worker()] });
+    assert.match(partial.content, /critics 1\/2 completed/);
   });
 
   it("bounds the in-context handoff and detail previews regardless of worker size", () => {
@@ -554,6 +688,21 @@ describe("fusion archive", () => {
       listFusionArchiveRuns(entries).map((m) => m.runId),
       ["fusion-A", "fusion-B"],
     );
+  });
+
+  it("records critic counts in the archive manifest", () => {
+    const { manifest } = buildFusionArchiveEntries({
+      runId: "fusion-C",
+      task: "t",
+      discoveryEnabled: false,
+      rewriteEnabled: false,
+      criticEnabled: true,
+      promptVariations: [],
+      workerResults: [worker()],
+      criticResults: [worker(), worker({ ok: false })],
+    });
+    assert.equal(manifest.criticCount, 2);
+    assert.equal(manifest.completedCritics, 1);
   });
 
   it("generates sortable, unique run ids", () => {
