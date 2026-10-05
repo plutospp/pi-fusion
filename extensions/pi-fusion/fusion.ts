@@ -1118,6 +1118,19 @@ export function formatCriticForSynthesis(result: WorkerResult, maxBytes: number)
   return `## Critic ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
 }
 
+const CRITIC_PLACEHOLDER = /{{\s*criticOutputs(?:Section)?\s*}}/;
+
+/**
+ * Synthesis templates saved before the critic stage existed (initializeFusionPrompts copies the
+ * defaults into the user config) have no critic placeholder. Add one so critic work is not lost.
+ */
+function ensureCriticPlaceholder(template: string, hasCritics: boolean): string {
+  if (!hasCritics || CRITIC_PLACEHOLDER.test(template)) return template;
+  const anchor = template.indexOf("## Synthesis instructions");
+  if (anchor === -1) return `${template}\n\n{{criticOutputsSection}}`;
+  return `${template.slice(0, anchor)}{{criticOutputsSection}}\n\n${template.slice(anchor)}`;
+}
+
 export function buildSynthesisPrompt(input: {
   originalText: string;
   discoveryContext: string;
@@ -1128,9 +1141,9 @@ export function buildSynthesisPrompt(input: {
   imageCount: number;
   template?: string;
 }): string {
-  const templateStr = input.template ?? DEFAULT_PROMPTS.synthesis;
   const workers = input.workerResults.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
   const criticsFormatted = (input.criticResults ?? []).map((result) => formatCriticForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
+  const templateStr = ensureCriticPlaceholder(input.template ?? DEFAULT_PROMPTS.synthesis, criticsFormatted.length > 0);
   const criticOutputsSection = criticsFormatted ? `## Critic evaluations\n\n${criticsFormatted}` : "";
 
   const imageNote =

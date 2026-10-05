@@ -58,6 +58,23 @@ function worker(overrides: Partial<WorkerResult> = {}): WorkerResult {
   };
 }
 
+const LEGACY_SYNTHESIS_TEMPLATE = [
+  "<!-- pi-fusion:synthesis-prompt -->",
+  "# LLM Fusion planning bundle",
+  "",
+  "## Original user request",
+  "",
+  "{{task}}",
+  "",
+  "## Worker outputs",
+  "",
+  "{{workerOutputs}}",
+  "",
+  "## Synthesis instructions",
+  "",
+  "- Act on the original request.",
+].join("\n");
+
 describe("buildWorkerArgs", () => {
   it("runs sub-agents headless and stateless but keeps other extensions enabled", () => {
     const args = buildWorkerArgs({ promptFile: "/tmp/w.md" });
@@ -399,6 +416,34 @@ describe("prompts", () => {
 
     assert.match(prompt, new RegExp(SYNTHESIS_PROMPT_MARKER));
     assert.ok(prompt.indexOf(SYNTHESIS_PROMPT_MARKER) < prompt.indexOf("Custom synthesis prompt"));
+  });
+
+  it("injects critic evaluations into synthesis templates that predate critics", () => {
+    const prompt = buildSynthesisPrompt({
+      originalText: "Implement feature",
+      discoveryContext: "",
+      promptVariations: [],
+      workerResults: [worker()],
+      criticResults: [worker({ lens: "correctness", output: "CRITIC_FINDING" })],
+      workerOutputBytes: 1_000,
+      imageCount: 0,
+      template: LEGACY_SYNTHESIS_TEMPLATE,
+    });
+    assert.match(prompt, /CRITIC_FINDING/);
+    assert.ok(prompt.indexOf("## Critic evaluations") < prompt.indexOf("## Synthesis instructions"));
+  });
+
+  it("adds no critic section to legacy templates when no critic ran", () => {
+    const prompt = buildSynthesisPrompt({
+      originalText: "Implement feature",
+      discoveryContext: "",
+      promptVariations: [],
+      workerResults: [worker()],
+      workerOutputBytes: 1_000,
+      imageCount: 0,
+      template: LEGACY_SYNTHESIS_TEMPLATE,
+    });
+    assert.doesNotMatch(prompt, /Critic evaluations/);
   });
 
   it("asks the rewrite model for exactly the configured number of prompts", () => {
