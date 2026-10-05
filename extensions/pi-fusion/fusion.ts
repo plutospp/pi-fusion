@@ -18,7 +18,9 @@ export interface FusionSettings {
   enabled: boolean;
   discoveryEnabled: boolean;
   rewriteEnabled: boolean;
+  criticEnabled: boolean;
   workerCount: number;
+  criticCount: number;
   workers: FusionWorker[];
   workerOutputBytes: number;
   contextBytes: number;
@@ -26,9 +28,11 @@ export interface FusionSettings {
   timeoutMs: number;
   discoveryModel: string | undefined;
   workerModel: string | undefined;
+  criticModel: string | undefined;
   synthesisModel: string | undefined;
   discoveryThinking: FusionThinkingLevel | undefined;
   workerThinking: FusionThinkingLevel | undefined;
+  criticThinking: FusionThinkingLevel | undefined;
   synthesisThinking: FusionThinkingLevel | undefined;
   plannerToolMode: FusionPlannerToolMode;
   preset?: string;
@@ -46,7 +50,9 @@ export interface FusionFlags {
   "fusion-disabled"?: boolean | string;
   "fusion-no-discovery"?: boolean | string;
   "fusion-no-rewrite"?: boolean | string;
+  "fusion-no-critic"?: boolean | string;
   "fusion-workers"?: boolean | string;
+  "fusion-critics"?: boolean | string;
   "fusion-output-bytes"?: boolean | string;
   "fusion-context-bytes"?: boolean | string;
   "fusion-resume-bytes"?: boolean | string;
@@ -54,15 +60,21 @@ export interface FusionFlags {
   "fusion-model"?: boolean | string;
   "fusion-discovery-model"?: boolean | string;
   "fusion-worker-model"?: boolean | string;
+  "fusion-critic-model"?: boolean | string;
   "fusion-synthesis-model"?: boolean | string;
   "fusion-discovery-thinking"?: boolean | string;
   "fusion-worker-thinking"?: boolean | string;
+  "fusion-critic-thinking"?: boolean | string;
   "fusion-synthesis-thinking"?: boolean | string;
   "fusion-planner-tools"?: boolean | string;
   "fusion-preset"?: boolean | string;
 }
 
 export interface WorkerLens {
+  name: string;
+}
+
+export interface CriticLens {
   name: string;
 }
 
@@ -105,10 +117,12 @@ export interface FusionTraceDetails {
   task: string;
   discoveryEnabled: boolean;
   rewriteEnabled: boolean;
+  criticEnabled: boolean;
   promptVariations: string[];
   discovery?: FusionTraceResult;
   rewrite?: FusionTraceResult;
   workers: FusionTraceResult[];
+  critics: FusionTraceResult[];
   /** Run id linking this trace to its full archive entries (if archived). */
   runId?: string;
   /** Number of archive chunk entries persisted for this run. */
@@ -136,7 +150,9 @@ export const DEFAULT_SETTINGS: FusionSettings = {
   enabled: false,
   discoveryEnabled: true,
   rewriteEnabled: true,
+  criticEnabled: true,
   workerCount: 3,
+  criticCount: 2,
   workers: [],
   workerOutputBytes: 12_000,
   contextBytes: 16_000,
@@ -144,9 +160,11 @@ export const DEFAULT_SETTINGS: FusionSettings = {
   timeoutMs: 600_000,
   discoveryModel: undefined,
   workerModel: undefined,
+  criticModel: undefined,
   synthesisModel: undefined,
   discoveryThinking: undefined,
   workerThinking: undefined,
+  criticThinking: undefined,
   synthesisThinking: undefined,
   plannerToolMode: "all",
   preset: undefined,
@@ -201,6 +219,14 @@ export function resolveWorkerThinking(
   return settings.workers[index]?.thinking ?? settings.workerThinking ?? fallback;
 }
 
+export function resolveCriticModel(settings: FusionSettings, fallback: string | undefined): string | undefined {
+  return settings.criticModel ?? fallback;
+}
+
+export function resolveCriticThinking(settings: FusionSettings, fallback: FusionThinkingLevel | undefined): FusionThinkingLevel | undefined {
+  return settings.criticThinking ?? fallback;
+}
+
 export function consumeNextTurnFusion(settings: FusionSettings): boolean {
   if (!settings.enabled) return false;
   settings.enabled = false;
@@ -228,9 +254,10 @@ export function resolveSettings(flags: FusionFlags = {}, persisted?: PersistedFu
   // Opt-in by default: fusion is off unless armed via --fusion-enabled, a
   // persisted /fusion on, or the settings pane. --fusion-disabled forces off.
   settings.enabled = flags["fusion-disabled"] === true ? false : (persisted?.enabled ?? flags["fusion-enabled"] === true);
-  // Discovery and rewrite are on by default; --fusion-no-discovery/--fusion-no-rewrite turn them off.
+  // Discovery, rewrite, and critic are on by default; --fusion-no-discovery/--fusion-no-rewrite/--fusion-no-critic turn them off.
   settings.discoveryEnabled = persisted?.discoveryEnabled ?? flags["fusion-no-discovery"] !== true;
   settings.rewriteEnabled = persisted?.rewriteEnabled ?? flags["fusion-no-rewrite"] !== true;
+  settings.criticEnabled = persisted?.criticEnabled ?? flags["fusion-no-critic"] !== true;
   settings.plannerToolMode = normalizePlannerToolMode(settings.plannerToolMode);
   if (flags["fusion-planner-tools"] !== undefined) {
     settings.plannerToolMode = normalizePlannerToolMode(flags["fusion-planner-tools"], settings.plannerToolMode);
@@ -239,6 +266,11 @@ export function resolveSettings(flags: FusionFlags = {}, persisted?: PersistedFu
     settings.workerCount = parsePositiveInteger(flags["fusion-workers"], settings.workerCount, { min: 1, max: 8 });
   } else {
     settings.workerCount = parsePositiveInteger(String(settings.workerCount), settings.workerCount, { min: 1, max: 8 });
+  }
+  if (flags["fusion-critics"] !== undefined) {
+    settings.criticCount = parsePositiveInteger(flags["fusion-critics"], settings.criticCount, { min: 1, max: 8 });
+  } else {
+    settings.criticCount = parsePositiveInteger(String(settings.criticCount), settings.criticCount, { min: 1, max: 8 });
   }
   settings.workerOutputBytes = parsePositiveInteger(flags["fusion-output-bytes"], settings.workerOutputBytes, {
     min: 1_000,
@@ -259,21 +291,27 @@ export function resolveSettings(flags: FusionFlags = {}, persisted?: PersistedFu
 
   const discoveryModelFlag = flags["fusion-discovery-model"];
   const workerModelFlag = flags["fusion-worker-model"] ?? flags["fusion-model"];
+  const criticModelFlag = flags["fusion-critic-model"];
   const synthesisModelFlag = flags["fusion-synthesis-model"];
   const discoveryThinkingFlag = flags["fusion-discovery-thinking"];
   const workerThinkingFlag = flags["fusion-worker-thinking"];
+  const criticThinkingFlag = flags["fusion-critic-thinking"];
   const synthesisThinkingFlag = flags["fusion-synthesis-thinking"];
   if (typeof discoveryModelFlag === "string") settings.discoveryModel = normalizeModelSpec(discoveryModelFlag);
   if (typeof workerModelFlag === "string") settings.workerModel = normalizeModelSpec(workerModelFlag);
+  if (typeof criticModelFlag === "string") settings.criticModel = normalizeModelSpec(criticModelFlag);
   if (typeof synthesisModelFlag === "string") settings.synthesisModel = normalizeModelSpec(synthesisModelFlag);
   if (typeof discoveryThinkingFlag === "string") settings.discoveryThinking = normalizeThinkingChoice(discoveryThinkingFlag);
   if (typeof workerThinkingFlag === "string") settings.workerThinking = normalizeThinkingChoice(workerThinkingFlag);
+  if (typeof criticThinkingFlag === "string") settings.criticThinking = normalizeThinkingChoice(criticThinkingFlag);
   if (typeof synthesisThinkingFlag === "string") settings.synthesisThinking = normalizeThinkingChoice(synthesisThinkingFlag);
   settings.discoveryModel = normalizeModelSpec(settings.discoveryModel);
   settings.workerModel = normalizeModelSpec(settings.workerModel);
+  settings.criticModel = normalizeModelSpec(settings.criticModel);
   settings.synthesisModel = normalizeModelSpec(settings.synthesisModel);
   settings.discoveryThinking = normalizeThinkingChoice(settings.discoveryThinking);
   settings.workerThinking = normalizeThinkingChoice(settings.workerThinking);
+  settings.criticThinking = normalizeThinkingChoice(settings.criticThinking);
   settings.synthesisThinking = normalizeThinkingChoice(settings.synthesisThinking);
   settings.plannerToolMode = normalizePlannerToolMode(settings.plannerToolMode);
   settings.workers = normalizeWorkerSlots(settings.workers, settings.workerCount);
@@ -398,12 +436,15 @@ export function buildResumeHandoff(input: {
   runId?: string;
   discoveryStatus: string;
   rewriteStatus: string;
+  criticStatus?: string;
   completedWorkers: number;
   totalWorkers: number;
   workerResults: WorkerResult[];
   maxBytes: number;
 }): string {
-  const headline = `∪ pi-fusion transcript: ${input.discoveryStatus}; ${input.rewriteStatus}; ${input.completedWorkers}/${input.totalWorkers} workers completed.`;
+  const statusParts = [input.discoveryStatus, input.rewriteStatus];
+  if (input.criticStatus && input.criticStatus !== "critic skipped") statusParts.push(input.criticStatus);
+  const headline = `∪ pi-fusion transcript: ${statusParts.join("; ")}; ${input.completedWorkers}/${input.totalWorkers} workers completed.`;
   const pointer = input.runId
     ? `Parallel sub-agents produced this answer. Their full transcripts are archived in this pi session (run ${input.runId}) and are intentionally kept out of context. Run \`/fusion-transcript ${input.runId}\` to inspect them.`
     : "Parallel sub-agents produced this answer; their full transcripts are kept out of context.";
@@ -423,14 +464,22 @@ export function buildResumeHandoff(input: {
   return `${headline}\n\n${pointer}\n\n## Worker conclusions\n${bounded}`;
 }
 
+function criticStatusLabel(results?: WorkerResult[]): string {
+  if (!results || results.length === 0) return "critic skipped";
+  const completed = results.filter((r) => r.ok).length;
+  return `critic completed (${completed}/${results.length})`;
+}
+
 export function buildFusionTraceMessage(input: {
   task: string;
   discoveryEnabled: boolean;
   rewriteEnabled: boolean;
+  criticEnabled: boolean;
   promptVariations: string[];
   discoveryResult?: WorkerResult;
   rewriteResult?: WorkerResult;
   workerResults: WorkerResult[];
+  criticResults?: WorkerResult[];
   runId?: string;
   archiveChunks?: number;
   archiveBytes?: number;
@@ -439,6 +488,7 @@ export function buildFusionTraceMessage(input: {
   const completedWorkers = input.workerResults.filter((result) => result.ok).length;
   const discoveryStatus = discoveryStatusLabel(input.discoveryResult);
   const rewriteStatus = rewriteStatusLabel(input.rewriteResult);
+  const criticStatus = criticStatusLabel(input.criticResults);
 
   return {
     customType: FUSION_TRACE_MESSAGE_TYPE,
@@ -446,6 +496,7 @@ export function buildFusionTraceMessage(input: {
       runId: input.runId,
       discoveryStatus,
       rewriteStatus,
+      criticStatus,
       completedWorkers,
       totalWorkers: input.workerResults.length,
       workerResults: input.workerResults,
@@ -456,10 +507,12 @@ export function buildFusionTraceMessage(input: {
       task: truncateUtf8(input.task.trim(), TRACE_TASK_BYTES),
       discoveryEnabled: input.discoveryEnabled,
       rewriteEnabled: input.rewriteEnabled,
+      criticEnabled: input.criticEnabled,
       promptVariations: input.promptVariations.map((prompt) => truncateUtf8(prompt.trim(), TRACE_PROMPT_BYTES)),
       discovery: input.discoveryResult ? traceResult("discovery", input.discoveryResult) : undefined,
       rewrite: input.rewriteResult ? traceResult("rewrite", input.rewriteResult) : undefined,
       workers: input.workerResults.map((result, index) => traceResult(`worker ${index + 1}: ${result.lens}`, result, input.promptVariations[index])),
+      critics: (input.criticResults ?? []).map((result, index) => traceResult(`critic ${index + 1}: ${result.lens}`, result)),
       runId: input.runId,
       archiveChunks: input.archiveChunks,
       archiveBytes: input.archiveBytes,
@@ -477,15 +530,18 @@ export function formatFusionTraceDetails(details: unknown): string {
     ? `Previews below are truncated. Full untruncated transcript archived in this session (run ${details.runId}, ${details.archiveChunks ?? 0} chunk(s), ${details.archiveBytes ?? 0} bytes). Run \`/fusion-transcript ${details.runId}\` for the complete archive.`
     : "Previews below are truncated.";
 
+  const critics = details.critics ?? [];
+
   return [
     "# pi-fusion transcript",
-    `discovery: ${details.discoveryEnabled ? "on" : "off"} • rewrite: ${details.rewriteEnabled ? "on" : "off"} • workers: ${details.workers.length}`,
+    `discovery: ${details.discoveryEnabled ? "on" : "off"} • rewrite: ${details.rewriteEnabled ? "on" : "off"} • critic: ${details.criticEnabled ? "on" : "off"} • workers: ${details.workers.length} • critics: ${critics.length}`,
     archiveNote,
     `\n## original request\n${details.task || "(empty)"}`,
     prompts,
     details.discovery ? formatTraceResult(details.discovery) : "",
     details.rewrite ? formatTraceResult(details.rewrite) : "",
     ...details.workers.map((result) => formatTraceResult(result)),
+    ...critics.map((result) => formatTraceResult(result)),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -542,10 +598,12 @@ export interface FusionArchiveInput {
   task: string;
   discoveryEnabled: boolean;
   rewriteEnabled: boolean;
+  criticEnabled: boolean;
   promptVariations: string[];
   discoveryResult?: WorkerResult;
   rewriteResult?: WorkerResult;
   workerResults: WorkerResult[];
+  criticResults?: WorkerResult[];
 }
 
 /**
@@ -606,6 +664,8 @@ function traceResultForArchive(label: string, result: WorkerResult): FusionTrace
 export function buildFusionArchive(input: FusionArchiveInput): string {
   const createdAt = input.createdAt ?? new Date().toISOString();
   const completedWorkers = input.workerResults.filter((result) => result.ok).length;
+  const critics = input.criticResults ?? [];
+  const completedCritics = critics.filter((result) => result.ok).length;
   const variations = input.promptVariations.length
     ? `## Worker prompt variations\n${input.promptVariations.map((prompt, index) => `${index + 1}. ${prompt.trim()}`).join("\n\n")}`
     : "";
@@ -614,14 +674,16 @@ export function buildFusionArchive(input: FusionArchiveInput): string {
     `# pi-fusion run ${input.runId}`,
     [
       `- created: ${createdAt}`,
-      `- discovery: ${input.discoveryEnabled ? "on" : "off"} • rewrite: ${input.rewriteEnabled ? "on" : "off"}`,
+      `- discovery: ${input.discoveryEnabled ? "on" : "off"} • rewrite: ${input.rewriteEnabled ? "on" : "off"} • critic: ${input.criticEnabled ? "on" : "off"}`,
       `- workers: ${completedWorkers}/${input.workerResults.length} completed`,
+      `- critics: ${completedCritics}/${critics.length} completed`,
     ].join("\n"),
     `## Original request\n${input.task.trim() || "(empty)"}`,
     variations,
     input.discoveryResult ? archiveSection("Discovery", input.discoveryResult) : "",
     input.rewriteResult ? archiveSection("Rewrite", input.rewriteResult) : "",
     ...input.workerResults.map((result, index) => archiveSection(`Worker ${index + 1}: ${result.lens}`, result, input.promptVariations[index])),
+    ...critics.map((result, index) => archiveSection(`Critic ${index + 1}: ${result.lens}`, result)),
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -717,6 +779,10 @@ export function getWorkerLens(index: number): WorkerLens {
   return { name: `#${index + 1}` };
 }
 
+export function getCriticLens(index: number): CriticLens {
+  return { name: `Critic #${index + 1}` };
+}
+
 // Set on every fusion sub-agent process. pi-fusion's own activation no-ops when
 // it sees this, so sub-agents still load the user's other extensions but never
 // recursively re-arm fusion.
@@ -781,6 +847,7 @@ export interface FusionPrompts {
   discovery: string;
   rewrite: string;
   worker: string;
+  critic: string;
   synthesis: string;
 }
 
@@ -845,10 +912,34 @@ Return concise markdown with these sections:
 
 Keep the result useful for the downstream synthesis step. Do not implement anything.`,
 
+  critic: `You are critic {{criticName}} in an LLM Fusion evaluation pass.
+
+Your job is to independently evaluate and critique the plans/outputs produced by parallel workers for the user's request. Identify flaws, blind spots, incorrect assumptions, risks, missing edge cases, or contradictions across worker proposals.
+
+Working directory: {{cwd}}
+
+{{recentContext}}## Original user request
+
+{{task}}
+
+## Worker outputs
+
+{{workerOutputs}}
+
+## Output contract
+
+Return concise markdown with these sections:
+
+1. **Evaluation & Strengths** — key insights or viable ideas across worker outputs.
+2. **Critique & Flaws** — specific errors, false assumptions, missing context, or risks in worker plans.
+3. **Recommendations for Synthesis** — what the downstream synthesis step should keep, reject, or modify.
+
+Do not implement anything. Keep your critique objective, sharp, and useful.`,
+
   synthesis: `<!-- pi-fusion:synthesis-prompt -->
 {{discoveryContext}}# LLM Fusion planning bundle
 
-A discovery agent gathered the shared context above, a query-rewrite pass generated worker prompts, and workers independently explored/planned. Synthesize their advice, verify anything important yourself, then act on the original request using your available tools. Treat all subagent output as advisory, not authoritative.{{imageNote}}
+A discovery agent gathered shared context, parallel workers explored/planned, and critic agents reviewed worker outputs for flaws and tradeoffs. Synthesize their advice, verify anything important yourself, then act on the original request using your available tools. Treat all subagent output as advisory, not authoritative.{{imageNote}}
 
 ## Original user request
 
@@ -858,13 +949,15 @@ A discovery agent gathered the shared context above, a query-rewrite pass genera
 
 {{workerOutputs}}
 
+{{criticOutputsSection}}
+
 ## Synthesis instructions
 
-- Act on the original request, not on the workers' wording.
+- Act on the original request, not on the workers' or critics' wording.
 - Use shared discovery context before re-reading files; avoid redundant tool calls unless verification or missing context requires them.
-- Use the workers to reduce blind spots, but verify before editing or running risky commands.
+- Consider both worker plans and critic evaluations to resolve contradictions and avoid risks.
 - Keep your visible response natural; do not dump a long meta-synthesis unless the user asked for one.
-- If worker plans disagree, choose the smallest safe path and mention the tradeoff only if useful.`,
+- Choose the smallest safe path and execute it.`,
 };
 
 export function renderTemplate(template: string, variables: Record<string, string | number>): string {
@@ -979,6 +1072,28 @@ export function buildWorkerPrompt(input: {
   });
 }
 
+export function buildCriticPrompt(input: {
+  task: string;
+  recentContext: string;
+  workerResults: WorkerResult[];
+  workerOutputBytes: number;
+  cwd: string;
+  lens: CriticLens;
+  template?: string;
+}): string {
+  const templateStr = input.template ?? DEFAULT_PROMPTS.critic;
+  const recentSection = input.recentContext.trim() ? `## Recent conversation context (truncated)\n\n${input.recentContext.trim()}\n\n` : "";
+  const workersFormatted = input.workerResults.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
+
+  return renderTemplate(templateStr, {
+    criticName: input.lens.name,
+    cwd: input.cwd,
+    recentContext: recentSection,
+    task: input.task.trim(),
+    workerOutputs: workersFormatted || "(no worker outputs)",
+  });
+}
+
 export function formatWorkerForSynthesis(result: WorkerResult, maxBytes: number): string {
   const status = result.ok ? "completed" : result.timedOut ? "timed out" : `failed${result.exitCode === null ? "" : ` (${result.exitCode})`}`;
   const diagnostics = result.stderr.trim() && !result.ok ? `\n\nStderr:\n${truncateUtf8(result.stderr.trim(), 2_000)}` : "";
@@ -991,17 +1106,33 @@ export function formatWorkerForSynthesis(result: WorkerResult, maxBytes: number)
   return `## Worker ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
 }
 
+export function formatCriticForSynthesis(result: WorkerResult, maxBytes: number): string {
+  const status = result.ok ? "completed" : result.timedOut ? "timed out" : `failed${result.exitCode === null ? "" : ` (${result.exitCode})`}`;
+  const diagnostics = result.stderr.trim() && !result.ok ? `\n\nStderr:\n${truncateUtf8(result.stderr.trim(), 2_000)}` : "";
+  const usage = result.usage.turns
+    ? `\n\nUsage: ${result.usage.turns} turn(s), ↑${result.usage.input}, ↓${result.usage.output}, $${result.usage.cost.toFixed(4)}${result.model ? `, ${result.model}` : ""}`
+    : result.model
+      ? `\n\nModel: ${result.model}`
+      : "";
+
+  return `## Critic ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
+}
+
 export function buildSynthesisPrompt(input: {
   originalText: string;
   discoveryContext: string;
   promptVariations: string[];
   workerResults: WorkerResult[];
+  criticResults?: WorkerResult[];
   workerOutputBytes: number;
   imageCount: number;
   template?: string;
 }): string {
   const templateStr = input.template ?? DEFAULT_PROMPTS.synthesis;
   const workers = input.workerResults.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
+  const criticsFormatted = (input.criticResults ?? []).map((result) => formatCriticForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
+  const criticOutputsSection = criticsFormatted ? `## Critic evaluations\n\n${criticsFormatted}` : "";
+
   const imageNote =
     input.imageCount > 0 ? `\n\nNote: the user attached ${input.imageCount} image(s). Workers did not see images; inspect them yourself.` : "";
   const discovery = input.discoveryContext.trim() ? `## Shared discovery context\n\n${truncateUtf8(input.discoveryContext.trim(), 64_000)}\n\n` : "";
@@ -1016,6 +1147,8 @@ export function buildSynthesisPrompt(input: {
     task: input.originalText.trim(),
     variations,
     workerOutputs: workers || "(no worker output)",
+    criticOutputsSection,
+    criticOutputs: criticsFormatted || "(no critic output)",
   });
   return prompt.includes(SYNTHESIS_PROMPT_MARKER) ? prompt : `${SYNTHESIS_PROMPT_MARKER}\n${prompt}`;
 }
