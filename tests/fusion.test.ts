@@ -728,3 +728,23 @@ describe("truncateUtf8", () => {
     assert.doesNotThrow(() => Buffer.from(output, "utf8").toString("utf8"));
   });
 });
+
+describe("flag registration", () => {
+  it("registers string flags without defaults so saved settings survive a restart", async () => {
+    const registered = new Map<string, { type?: string; default?: unknown }>();
+    const fakePi = {
+      registerMessageRenderer() {},
+      registerCommand() {},
+      on() {},
+      registerFlag(name: string, options: { type?: string; default?: unknown }) {
+        registered.set(name, options);
+      },
+    };
+    const { default: piFusion } = await import("../extensions/pi-fusion/index.ts");
+    piFusion(fakePi as never);
+    assert.ok(registered.size > 0);
+    for (const [name, options] of registered) {
+      if (options.type === "string") assert.equal(options.default, undefined, `${name} must not register a default`);
+    }
+  });
+});
