@@ -480,6 +480,20 @@ describe("prompts", () => {
     assert.doesNotMatch(prompt, /Critic evaluations/);
   });
 
+  it("frames critic findings as claims to verify", () => {
+    const prompt = buildSynthesisPrompt({
+      originalText: "Implement feature",
+      discoveryContext: "",
+      promptVariations: [],
+      workerResults: [worker()],
+      criticResults: [worker({ lens: "risk", output: "RISK_FINDING" })],
+      workerOutputBytes: 1_000,
+      imageCount: 0,
+    });
+    assert.match(prompt, /claim to check/);
+    assert.match(prompt, /not independent evidence/);
+  });
+
   it("asks the rewrite model for exactly the configured number of prompts", () => {
     const prompt = buildRewritePrompt({ task: "Add tests", recentContext: "", workerCount: 4 });
     assert.match(prompt, /into 4 complementary exploration prompts/);
