@@ -36,8 +36,8 @@ Open pi and turn it on from the settings pane:
 
 **pi-fusion adds a planning fanout to pi.** Before the normal pi turn starts, it runs an
 (optional) discovery agent, rewrites variations of the prompt into complementary angles, fans out to
-planner workers, evaluates worker plans with multiple critics, then injects their notes and critiques
-back into the main thread, that acts as a synthesis step.
+planner workers, optionally reviews their plans with read-only critics, then injects their notes and
+critiques back into the main thread, that acts as a synthesis step.
 
 Combining independent model responses has been shown to outscore the individual frontier models on
 many benchmarks. Because independent passes behave differently, the synthesis model can reuse the
@@ -65,25 +65,21 @@ flowchart LR
   R --> W1
   R --> W2
   R --> W3
-  W1 --> C1["Critic #1 (optional)"]
-  W2 --> C1
-  W3 --> C1
-  W1 --> C2["Critic #2 (optional)"]
-  W2 --> C2
-  W3 --> C2
+  W1 --> C["Critics (optional, 1-4)"]
+  W2 --> C
+  W3 --> C
   W1 --> A["Synthesis (pi actor turn)"]
   W2 --> A
   W3 --> A
-  C1 --> A
-  C2 --> A
+  C --> A
   D --> A
   A --> O([One final turn])
   classDef solid fill:#0E481F,stroke:#0E481F,color:#EEF3EA;
   classDef outline fill:#E7ECE6,stroke:#0E481F,color:#0E481F;
   classDef pill fill:#E3E2DC,stroke:#C7C7C0,color:#16301F;
   class U,O pill;
-  class D,W1,W2,W3,C1,C2,A solid;
-  class R outline;
+  class D,W1,W2,W3,A solid;
+  class R,C outline;
 ```
 
 ## Why this exists
@@ -175,7 +171,7 @@ Open the settings pane:
 | Agent tools    | Switches discovery/workers between all tools and read-only.    |
 | Discovery      | Picks the context-loading model and reasoning effort.          |
 | Rewrite        | Toggles prompt rewriting before worker fanout.                 |
-| Critics        | Toggles critic layer, picks model and reasoning effort.        |
+| Critics        | Toggles critics, picks model and reasoning effort.             |
 | Synthesis      | Picks the synthesis model and reasoning effort.                |
 | Save and close | Persists settings in the pi session.                           |
 
@@ -288,14 +284,26 @@ This prompt runs on each parallel worker.
 
 #### 4. Critic Prompt (`prompts.critic`)
 
-This prompt runs on each critic agent evaluating worker outputs.
+This prompt runs on each critic after the workers finish. Critics run in parallel with read-only
+tools (`read`, `grep`, `find`, `ls`). One critic (the default) does a general review. With 2-4
+critics (`/fusion critics N`), each critic gets one focus: correctness, risk, completeness, and
+simplicity. Critics are skipped when no worker completed. `--fusion-output-bytes` also limits each
+critic's output in the synthesis prompt.
 
 - **Placeholders:**
-  - `{{cwd}}`: Working directory of your project.
-  - `{{task}}`: Your original prompt.
-  - `{{criticName}}`: Critic index/name (e.g. `Critic #1`, `Critic #2`).
-  - `{{workerOutputs}}`: Formatted worker outputs/plans to be evaluated.
+  - `{{discoveryContext}}`: Pre-formatted shared discovery context (same as the workers get).
   - `{{recentContext}}`: Pre-formatted recent conversation history.
+  - `{{task}}`: Your original prompt.
+  - `{{variations}}`: List of worker prompt variations (if rewrite is on).
+  - `{{workerOutputs}}`: Completed worker outputs, plus a note that names failed workers.
+  - `{{criticName}}`: Critic number (e.g. `#1`, `#2`).
+  - `{{criticFocus}}`: The critic's focus (`general`, `correctness`, `risk`, `completeness`, or `simplicity`).
+  - `{{criticBrief}}`: What the critic should look for, for its focus.
+  - `{{toolGuidance}}`: Read-only tool guidance.
+  - `{{cwd}}`: Working directory of your project.
+
+The default prompt puts the shared parts first and the critic role last, so all critics share the
+same prompt start (providers with prefix caching can reuse it).
 
 #### 5. Synthesis Prompt (`prompts.synthesis`)
 
@@ -306,8 +314,12 @@ This prompt formats the final planning bundle injected into the synthesis turn.
   - `{{discoveryContext}}`: Context loaded by the discovery agent.
   - `{{variations}}`: List of worker prompt variations.
   - `{{workerOutputs}}`: Outputs and plans produced by each worker.
-  - `{{criticOutputsSection}}`: Pre-formatted critic evaluations section.
+  - `{{criticOutputsSection}}`: Pre-formatted critic evaluations section, with a note to verify critic findings.
   - `{{criticOutputs}}`: Critic evaluations produced by critic agents.
+
+  If critics ran but the template has neither critic placeholder (for example, a template saved by an
+  older pi-fusion version), pi-fusion adds the critic section before `## Synthesis instructions`, or at
+  the end.
   - `{{imageNote}}`: A note telling the synthesis step that workers did not see attached images (if any).
 
 > 💡 **Important:** The synthesis prompt template should contain `<!-- pi-fusion:synthesis-prompt -->` so that subsequent conversation turns know a fused turn has finished and bypass fusion automatically. If a custom synthesis prompt omits it, pi-fusion prepends the marker defensively.
