@@ -841,12 +841,12 @@ export default function piFusion(pi: ExtensionAPI): void {
         activePanel = undefined;
 
         const criticIndices = Array.from({ length: settings.criticCount }, (_, i) => i);
-        const criticStatusLines = criticIndices.map((_, index) => `○ critic ${index + 1}: ${getCriticLens(index).name}`);
+        const criticStatusLines = criticIndices.map((_, index) => `○ critic ${index + 1}: ${getCriticLens(index, settings.criticCount).focus}`);
         setFusionStatus(ctx, criticStatusLines);
 
         const criticStates: FusionLiveWorkerState[] = criticIndices.map((_, index) => ({
           index,
-          label: getCriticLens(index).name,
+          label: `critic ${getCriticLens(index, settings.criticCount).name}`,
           lens: "critic",
           status: "queued" as const,
           output: "",
@@ -859,10 +859,12 @@ export default function piFusion(pi: ExtensionAPI): void {
         const criticThinking = resolveCriticThinking(settings, pi.getThinkingLevel());
 
         const criticPromises = criticIndices.map(async (index) => {
-          const lens = getCriticLens(index);
+          const lens = getCriticLens(index, settings.criticCount);
           const prompt = buildCriticPrompt({
             task,
             recentContext,
+            discoveryContext,
+            promptVariations: settings.rewriteEnabled ? promptVariations : [],
             workerResults,
             workerOutputBytes: settings.workerOutputBytes,
             cwd: ctx.cwd,

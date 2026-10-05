@@ -365,21 +365,52 @@ describe("prompts", () => {
     assert.doesNotMatch(prompt, /mapper|planner|skeptic/);
   });
 
-  it("builds critic prompt with worker outputs and user task", () => {
-    const lens = getCriticLens(0);
-    const prompt = buildCriticPrompt({
-      task: "Implement feature X",
-      recentContext: "Recent conversation context",
-      workerResults: [worker({ output: "Plan for feature X" })],
-      workerOutputBytes: 12_000,
-      cwd: "/repo",
-      lens,
-    });
+  const criticBase = {
+    task: "Implement feature X",
+    recentContext: "",
+    discoveryContext: "DISCOVERY_FACTS",
+    promptVariations: ["Explore API"],
+    workerResults: [worker({ output: "Plan for feature X" })],
+    workerOutputBytes: 12_000,
+    cwd: "/repo",
+  };
 
-    assert.equal(lens.name, "Critic #1");
-    assert.match(prompt, /critic Critic #1/i);
-    assert.match(prompt, /Implement feature X/);
-    assert.match(prompt, /Plan for feature X/);
+  it("gives each critic a distinct focus and a clean name", () => {
+    const lenses = [0, 1, 2, 3].map((index) => getCriticLens(index, 4));
+    assert.deepEqual(
+      lenses.map((lens) => lens.name),
+      ["#1", "#2", "#3", "#4"],
+    );
+    assert.equal(new Set(lenses.map((lens) => lens.focus)).size, 4);
+    assert.equal(getCriticLens(0, 1).focus, "general");
+  });
+
+  it("builds grounded critic prompts that share a prefix and differ only in the role", () => {
+    const a = buildCriticPrompt({ ...criticBase, lens: getCriticLens(0, 2) });
+    const b = buildCriticPrompt({ ...criticBase, lens: getCriticLens(1, 2) });
+    assert.match(a, /You are critic #1 /);
+    assert.doesNotMatch(a, /critic Critic/);
+    assert.match(a, /DISCOVERY_FACTS/);
+    assert.match(a, /Explore API/);
+    assert.match(a, /Plan for feature X/);
+    assert.match(a, /read-only/i);
+    assert.match(a, /Do not invent issues/);
+    assert.notEqual(a, b);
+    assert.equal(a.slice(0, a.indexOf("## Your role")), b.slice(0, b.indexOf("## Your role")));
+  });
+
+  it("shows critics only completed worker outputs and names failed workers", () => {
+    const prompt = buildCriticPrompt({
+      ...criticBase,
+      workerResults: [
+        worker({ index: 0, lens: "#1", output: "GOOD_PLAN" }),
+        worker({ index: 1, lens: "#2", ok: false, timedOut: true, output: "(worker produced no final assistant output)" }),
+      ],
+      lens: getCriticLens(0, 1),
+    });
+    assert.match(prompt, /GOOD_PLAN/);
+    assert.doesNotMatch(prompt, /worker produced no final assistant output/);
+    assert.match(prompt, /Worker 2 \(#2\): timed out/);
   });
 
   it("builds synthesis prompt with bounded worker outputs, critic outputs, and image warning", () => {

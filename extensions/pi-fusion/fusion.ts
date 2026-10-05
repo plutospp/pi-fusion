@@ -76,6 +76,8 @@ export interface WorkerLens {
 
 export interface CriticLens {
   name: string;
+  focus: string;
+  brief: string;
 }
 
 export interface WorkerResult {
@@ -779,9 +781,41 @@ export function getWorkerLens(index: number): WorkerLens {
   return { name: `#${index + 1}` };
 }
 
-export function getCriticLens(index: number): CriticLens {
-  return { name: `Critic #${index + 1}` };
+const CRITIC_FOCUSES: ReadonlyArray<Omit<CriticLens, "name">> = [
+  {
+    focus: "correctness",
+    brief:
+      "Check the plans against the code and the facts. Find wrong assumptions about files, APIs, behavior, or commands. Verify important claims with your tools.",
+  },
+  {
+    focus: "risk",
+    brief: "Find what could break: data loss, security, breaking changes, concurrency, migrations, and missing rollback or safety checks.",
+  },
+  {
+    focus: "completeness",
+    brief: "Find missing requirements, edge cases, tests, and verification steps. Check that the plans cover the whole request.",
+  },
+  {
+    focus: "simplicity",
+    brief: "Find over-engineering and scope creep. Name the smallest change that meets the request.",
+  },
+];
+
+const GENERAL_CRITIC_FOCUS: Omit<CriticLens, "name"> = {
+  focus: "general",
+  brief: "Review correctness, risk, completeness, and simplicity. Report the most important problems first.",
+};
+
+/** One focus per critic, so more critics than focuses would only repeat a focus. */
+export const MAX_CRITICS = CRITIC_FOCUSES.length;
+
+/** One critic does a general review. Two or more critics each get a different focus. */
+export function getCriticLens(index: number, count: number): CriticLens {
+  const focus = count <= 1 ? GENERAL_CRITIC_FOCUS : CRITIC_FOCUSES[index % CRITIC_FOCUSES.length];
+  return { name: `#${index + 1}`, ...focus };
 }
+
+const CRITIC_TOOL_GUIDANCE = "Tool access: read-only tools only. Do not modify files or run write-capable commands.";
 
 // Set on every fusion sub-agent process. pi-fusion's own activation no-ops when
 // it sees this, so sub-agents still load the user's other extensions but never
@@ -912,29 +946,33 @@ Return concise markdown with these sections:
 
 Keep the result useful for the downstream synthesis step. Do not implement anything.`,
 
-  critic: `You are critic {{criticName}} in an LLM Fusion evaluation pass.
+  critic: `{{discoveryContext}}{{recentContext}}## Original user request
 
-Your job is to independently evaluate and critique the plans/outputs produced by parallel workers for the user's request. Identify flaws, blind spots, incorrect assumptions, risks, missing edge cases, or contradictions across worker proposals.
-
-Working directory: {{cwd}}
-
-{{recentContext}}## Original user request
-
-{{task}}
+{{task}}{{variations}}
 
 ## Worker outputs
 
 {{workerOutputs}}
 
+## Your role
+
+You are critic {{criticName}} in an LLM Fusion review pass. Focus: {{criticFocus}}.
+
+{{criticBrief}}
+
+{{toolGuidance}} Use the shared discovery context first. Read more only to verify a claim.
+
+Working directory: {{cwd}}
+
 ## Output contract
 
-Return concise markdown with these sections:
+Return concise markdown:
 
-1. **Evaluation & Strengths** — key insights or viable ideas across worker outputs.
-2. **Critique & Flaws** — specific errors, false assumptions, missing context, or risks in worker plans.
-3. **Recommendations for Synthesis** — what the downstream synthesis step should keep, reject, or modify.
+1. **Findings** — the most important problems for your focus, most severe first. For each: the worker(s), the problem, the evidence (file:line, command, or quote), and whether you verified it.
+2. **Keep** — worker ideas that hold up under your focus.
+3. **Recommendations for synthesis** — what to keep, reject, or change.
 
-Do not implement anything. Keep your critique objective, sharp, and useful.`,
+Stay inside your focus. If you find no real problem, say so. Do not invent issues. Do not implement anything.`,
 
   synthesis: `<!-- pi-fusion:synthesis-prompt -->
 {{discoveryContext}}# LLM Fusion planning bundle
@@ -1075,6 +1113,8 @@ export function buildWorkerPrompt(input: {
 export function buildCriticPrompt(input: {
   task: string;
   recentContext: string;
+  discoveryContext: string;
+  promptVariations: string[];
   workerResults: WorkerResult[];
   workerOutputBytes: number;
   cwd: string;
@@ -1082,15 +1122,31 @@ export function buildCriticPrompt(input: {
   template?: string;
 }): string {
   const templateStr = input.template ?? DEFAULT_PROMPTS.critic;
+  const discoverySection = input.discoveryContext.trim() ? `## Shared discovery context\n\n${input.discoveryContext.trim()}\n\n` : "";
   const recentSection = input.recentContext.trim() ? `## Recent conversation context (truncated)\n\n${input.recentContext.trim()}\n\n` : "";
-  const workersFormatted = input.workerResults.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
+  const variations =
+    input.promptVariations.length > 0
+      ? `\n\n## Worker prompt variations\n\n${input.promptVariations.map((variation, index) => `${index + 1}. ${variation}`).join("\n")}`
+      : "";
+  const completed = input.workerResults.filter((result) => result.ok);
+  const failed = input.workerResults.filter((result) => !result.ok);
+  const failedNote =
+    failed.length > 0
+      ? `\n\nNot shown (no usable output): ${failed.map((result) => `Worker ${result.index + 1} (${result.lens}): ${workerStatus(result)}`).join("; ")}.`
+      : "";
+  const workersFormatted = completed.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
 
   return renderTemplate(templateStr, {
-    criticName: input.lens.name,
-    cwd: input.cwd,
+    discoveryContext: discoverySection,
     recentContext: recentSection,
     task: input.task.trim(),
-    workerOutputs: workersFormatted || "(no worker outputs)",
+    variations,
+    workerOutputs: `${workersFormatted || "(no completed worker outputs)"}${failedNote}`,
+    criticName: input.lens.name,
+    criticFocus: input.lens.focus,
+    criticBrief: input.lens.brief,
+    toolGuidance: CRITIC_TOOL_GUIDANCE,
+    cwd: input.cwd,
   });
 }
 
