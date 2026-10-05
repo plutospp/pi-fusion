@@ -410,87 +410,70 @@ export default function piFusion(pi: ExtensionAPI): void {
   pi.registerFlag("fusion-workers", {
     description: "Number of parallel pi-fusion workers (1-8, default 3)",
     type: "string",
-    default: String(DEFAULT_SETTINGS.workerCount),
   });
   pi.registerFlag("fusion-critics", {
     description: "Number of parallel pi-fusion critics (1-4, default 1)",
     type: "string",
-    default: String(DEFAULT_SETTINGS.criticCount),
   });
   pi.registerFlag("fusion-output-bytes", {
     description: "Max bytes from each worker or critic inserted into downstream prompts",
     type: "string",
-    default: String(DEFAULT_SETTINGS.workerOutputBytes),
   });
   pi.registerFlag("fusion-context-bytes", {
     description: "Max bytes of recent conversation sent to each worker",
     type: "string",
-    default: String(DEFAULT_SETTINGS.contextBytes),
   });
   pi.registerFlag("fusion-resume-bytes", {
     description: "Max bytes of worker conclusions kept in context for resumed/subsequent turns",
     type: "string",
-    default: String(DEFAULT_SETTINGS.resumeContextBytes),
   });
   pi.registerFlag("fusion-timeout-ms", {
     description: "Timeout per sub-agent (discovery, worker, critic) in milliseconds",
     type: "string",
-    default: String(DEFAULT_SETTINGS.timeoutMs),
   });
   pi.registerFlag("fusion-model", {
     description: "Alias for --fusion-worker-model",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-discovery-model", {
     description: "Model for the fusion discovery agent, or current/default",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-worker-model", {
     description: "Model for fusion workers, or current/default",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-critic-model", {
     description: "Model for fusion critics, or current/default",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-synthesis-model", {
     description: "Model for the synthesis turn, or current/default",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-critic-thinking", {
     description: "Reasoning effort for fusion critics: current/off/minimal/low/medium/high/xhigh",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-discovery-thinking", {
     description: "Reasoning effort for discovery: current/off/minimal/low/medium/high/xhigh",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-worker-thinking", {
     description: "Reasoning effort for fusion workers: current/off/minimal/low/medium/high/xhigh",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-synthesis-thinking", {
     description: "Reasoning effort for the synthesis turn: current/off/minimal/low/medium/high/xhigh",
     type: "string",
-    default: "current",
   });
   pi.registerFlag("fusion-planner-tools", {
     description: "Tool access for discovery and planner workers: all/read-only (default all)",
     type: "string",
-    default: DEFAULT_SETTINGS.plannerToolMode,
   });
   pi.registerFlag("fusion-preset", {
     description: "Load a named pi-fusion preset from ~/.pi/agent/fusion.json or .pi/fusion.json",
     type: "string",
-    default: "",
   });
 
   function persist(): void {
