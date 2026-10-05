@@ -125,7 +125,7 @@ describe("settings", () => {
     });
 
     assert.equal(settings.workerCount, 8);
-    assert.equal(settings.criticCount, 8);
+    assert.equal(settings.criticCount, MAX_CRITICS);
     assert.equal(settings.workerOutputBytes, 1_000);
     assert.equal(settings.contextBytes, 0);
     assert.equal(settings.timeoutMs, 600_000);
@@ -137,6 +137,11 @@ describe("settings", () => {
     assert.equal(settings.workerThinking, "high");
     assert.equal(settings.criticThinking, "medium");
     assert.equal(settings.synthesisThinking, "xhigh");
+  });
+
+  it("defaults to one general critic and caps critics at MAX_CRITICS", () => {
+    assert.equal(resolveSettings({}).criticCount, 1);
+    assert.equal(resolveSettings({ "fusion-critics": "999" }).criticCount, MAX_CRITICS);
   });
 
   it("normalizes current/default and ignores invalid reasoning levels", () => {
@@ -564,6 +569,20 @@ describe("fusion trace", () => {
     assert.match(expanded, /critique plan A/);
   });
 
+  it("reports skipped and partial critic stages clearly", () => {
+    const base = {
+      task: "t",
+      discoveryEnabled: false,
+      rewriteEnabled: false,
+      criticEnabled: true,
+      promptVariations: [],
+    };
+    const skipped = buildFusionTraceMessage({ ...base, workerResults: [worker({ ok: false })], criticSkipReason: "no completed workers" });
+    assert.match(skipped.content, /critics skipped \(no completed workers\)/);
+    const partial = buildFusionTraceMessage({ ...base, workerResults: [worker()], criticResults: [worker({ ok: false }), worker()] });
+    assert.match(partial.content, /critics 1\/2 completed/);
+  });
+
   it("bounds the in-context handoff and detail previews regardless of worker size", () => {
     const message = buildFusionTraceMessage({
       task: "x".repeat(10_000),
@@ -669,6 +688,21 @@ describe("fusion archive", () => {
       listFusionArchiveRuns(entries).map((m) => m.runId),
       ["fusion-A", "fusion-B"],
     );
+  });
+
+  it("records critic counts in the archive manifest", () => {
+    const { manifest } = buildFusionArchiveEntries({
+      runId: "fusion-C",
+      task: "t",
+      discoveryEnabled: false,
+      rewriteEnabled: false,
+      criticEnabled: true,
+      promptVariations: [],
+      workerResults: [worker()],
+      criticResults: [worker(), worker({ ok: false })],
+    });
+    assert.equal(manifest.criticCount, 2);
+    assert.equal(manifest.completedCritics, 1);
   });
 
   it("generates sortable, unique run ids", () => {

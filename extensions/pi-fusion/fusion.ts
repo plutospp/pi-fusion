@@ -154,7 +154,7 @@ export const DEFAULT_SETTINGS: FusionSettings = {
   rewriteEnabled: true,
   criticEnabled: true,
   workerCount: 3,
-  criticCount: 2,
+  criticCount: 1,
   workers: [],
   workerOutputBytes: 12_000,
   contextBytes: 16_000,
@@ -270,9 +270,9 @@ export function resolveSettings(flags: FusionFlags = {}, persisted?: PersistedFu
     settings.workerCount = parsePositiveInteger(String(settings.workerCount), settings.workerCount, { min: 1, max: 8 });
   }
   if (flags["fusion-critics"] !== undefined) {
-    settings.criticCount = parsePositiveInteger(flags["fusion-critics"], settings.criticCount, { min: 1, max: 8 });
+    settings.criticCount = parsePositiveInteger(flags["fusion-critics"], settings.criticCount, { min: 1, max: MAX_CRITICS });
   } else {
-    settings.criticCount = parsePositiveInteger(String(settings.criticCount), settings.criticCount, { min: 1, max: 8 });
+    settings.criticCount = parsePositiveInteger(String(settings.criticCount), settings.criticCount, { min: 1, max: MAX_CRITICS });
   }
   settings.workerOutputBytes = parsePositiveInteger(flags["fusion-output-bytes"], settings.workerOutputBytes, {
     min: 1_000,
@@ -445,7 +445,7 @@ export function buildResumeHandoff(input: {
   maxBytes: number;
 }): string {
   const statusParts = [input.discoveryStatus, input.rewriteStatus];
-  if (input.criticStatus && input.criticStatus !== "critic skipped") statusParts.push(input.criticStatus);
+  if (input.criticStatus) statusParts.push(input.criticStatus);
   const headline = `∪ pi-fusion transcript: ${statusParts.join("; ")}; ${input.completedWorkers}/${input.totalWorkers} workers completed.`;
   const pointer = input.runId
     ? `Parallel sub-agents produced this answer. Their full transcripts are archived in this pi session (run ${input.runId}) and are intentionally kept out of context. Run \`/fusion-transcript ${input.runId}\` to inspect them.`
@@ -466,10 +466,10 @@ export function buildResumeHandoff(input: {
   return `${headline}\n\n${pointer}\n\n## Worker conclusions\n${bounded}`;
 }
 
-function criticStatusLabel(results?: WorkerResult[]): string {
-  if (!results || results.length === 0) return "critic skipped";
-  const completed = results.filter((r) => r.ok).length;
-  return `critic completed (${completed}/${results.length})`;
+function criticStatusLabel(results?: WorkerResult[], skipReason?: CriticSkipReason): string | undefined {
+  if (skipReason === "no completed workers") return "critics skipped (no completed workers)";
+  if (!results || results.length === 0) return undefined;
+  return `critics ${results.filter((result) => result.ok).length}/${results.length} completed`;
 }
 
 export function buildFusionTraceMessage(input: {
@@ -482,6 +482,7 @@ export function buildFusionTraceMessage(input: {
   rewriteResult?: WorkerResult;
   workerResults: WorkerResult[];
   criticResults?: WorkerResult[];
+  criticSkipReason?: CriticSkipReason;
   runId?: string;
   archiveChunks?: number;
   archiveBytes?: number;
@@ -490,7 +491,7 @@ export function buildFusionTraceMessage(input: {
   const completedWorkers = input.workerResults.filter((result) => result.ok).length;
   const discoveryStatus = discoveryStatusLabel(input.discoveryResult);
   const rewriteStatus = rewriteStatusLabel(input.rewriteResult);
-  const criticStatus = criticStatusLabel(input.criticResults);
+  const criticStatus = criticStatusLabel(input.criticResults, input.criticSkipReason);
 
   return {
     customType: FUSION_TRACE_MESSAGE_TYPE,
@@ -579,6 +580,9 @@ export interface FusionArchiveManifest {
   rewriteEnabled: boolean;
   workerCount: number;
   completedWorkers: number;
+  /** Optional so archives written before the critic stage stay valid. */
+  criticCount?: number;
+  completedCritics?: number;
   chunks: number;
   bytes: number;
 }
@@ -717,6 +721,8 @@ export function buildFusionArchiveEntries(input: FusionArchiveInput): {
     rewriteEnabled: input.rewriteEnabled,
     workerCount: input.workerResults.length,
     completedWorkers: input.workerResults.filter((result) => result.ok).length,
+    criticCount: (input.criticResults ?? []).length,
+    completedCritics: (input.criticResults ?? []).filter((result) => result.ok).length,
     chunks: pieces.length,
     bytes: Buffer.byteLength(transcript, "utf8"),
   };
@@ -1164,7 +1170,7 @@ export function buildCriticPrompt(input: {
   });
 }
 
-export function formatWorkerForSynthesis(result: WorkerResult, maxBytes: number): string {
+function formatAgentForSynthesis(kind: "Worker" | "Critic", result: WorkerResult, maxBytes: number): string {
   const status = result.ok ? "completed" : result.timedOut ? "timed out" : `failed${result.exitCode === null ? "" : ` (${result.exitCode})`}`;
   const diagnostics = result.stderr.trim() && !result.ok ? `\n\nStderr:\n${truncateUtf8(result.stderr.trim(), 2_000)}` : "";
   const usage = result.usage.turns
@@ -1173,19 +1179,15 @@ export function formatWorkerForSynthesis(result: WorkerResult, maxBytes: number)
       ? `\n\nModel: ${result.model}`
       : "";
 
-  return `## Worker ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
+  return `## ${kind} ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
+}
+
+export function formatWorkerForSynthesis(result: WorkerResult, maxBytes: number): string {
+  return formatAgentForSynthesis("Worker", result, maxBytes);
 }
 
 export function formatCriticForSynthesis(result: WorkerResult, maxBytes: number): string {
-  const status = result.ok ? "completed" : result.timedOut ? "timed out" : `failed${result.exitCode === null ? "" : ` (${result.exitCode})`}`;
-  const diagnostics = result.stderr.trim() && !result.ok ? `\n\nStderr:\n${truncateUtf8(result.stderr.trim(), 2_000)}` : "";
-  const usage = result.usage.turns
-    ? `\n\nUsage: ${result.usage.turns} turn(s), ↑${result.usage.input}, ↓${result.usage.output}, $${result.usage.cost.toFixed(4)}${result.model ? `, ${result.model}` : ""}`
-    : result.model
-      ? `\n\nModel: ${result.model}`
-      : "";
-
-  return `## Critic ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
+  return formatAgentForSynthesis("Critic", result, maxBytes);
 }
 
 const CRITIC_PLACEHOLDER = /{{\s*criticOutputs(?:Section)?\s*}}/;

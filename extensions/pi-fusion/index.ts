@@ -413,12 +413,12 @@ export default function piFusion(pi: ExtensionAPI): void {
     default: String(DEFAULT_SETTINGS.workerCount),
   });
   pi.registerFlag("fusion-critics", {
-    description: "Number of parallel pi-fusion critics (1-8, default 2)",
+    description: "Number of parallel pi-fusion critics (1-4, default 1)",
     type: "string",
     default: String(DEFAULT_SETTINGS.criticCount),
   });
   pi.registerFlag("fusion-output-bytes", {
-    description: "Max bytes from each worker inserted into the synthesis prompt",
+    description: "Max bytes from each worker or critic inserted into downstream prompts",
     type: "string",
     default: String(DEFAULT_SETTINGS.workerOutputBytes),
   });
@@ -433,7 +433,7 @@ export default function piFusion(pi: ExtensionAPI): void {
     default: String(DEFAULT_SETTINGS.resumeContextBytes),
   });
   pi.registerFlag("fusion-timeout-ms", {
-    description: "Planner worker timeout in milliseconds",
+    description: "Timeout per sub-agent (discovery, worker, critic) in milliseconds",
     type: "string",
     default: String(DEFAULT_SETTINGS.timeoutMs),
   });
@@ -637,7 +637,7 @@ export default function piFusion(pi: ExtensionAPI): void {
       const items = lastTranscriptRuns.map((run) => ({
         value: run.runId,
         label: run.runId,
-        description: `${run.completedWorkers}/${run.workerCount} workers • ${run.bytes} bytes`,
+        description: `${run.completedWorkers}/${run.workerCount} workers${run.criticCount ? ` • ${run.completedCritics ?? 0}/${run.criticCount} critics` : ""} • ${run.bytes} bytes`,
       }));
       const filtered = items.filter((item) => item.value.startsWith(prefix));
       return filtered.length > 0 ? filtered : null;
@@ -661,7 +661,10 @@ export default function piFusion(pi: ExtensionAPI): void {
           return;
         }
         const summary = lastTranscriptRuns
-          .map((run) => `${run.runId} (${run.completedWorkers}/${run.workerCount} workers, ${run.bytes} bytes)`)
+          .map(
+            (run) =>
+              `${run.runId} (${run.completedWorkers}/${run.workerCount} workers${run.criticCount ? `, ${run.completedCritics ?? 0}/${run.criticCount} critics` : ""}, ${run.bytes} bytes)`,
+          )
           .join("\n");
         ctx.ui.notify(`pi-fusion runs in this session:\n${summary}`, "info");
         return;
@@ -837,6 +840,7 @@ export default function piFusion(pi: ExtensionAPI): void {
       if (abort.signal.aborted) return undefined;
 
       const criticPlan = planCriticStage(settings, workerResults);
+      const criticSkipReason = criticPlan.run ? undefined : criticPlan.reason;
       let criticResults: WorkerResult[] | undefined;
       if (criticPlan.run) {
         activePanel?.close();
@@ -942,6 +946,7 @@ export default function piFusion(pi: ExtensionAPI): void {
           rewriteResult,
           workerResults,
           criticResults,
+          criticSkipReason,
           runId,
           archiveChunks: archive.chunks.length,
           archiveBytes: archive.manifest.bytes,
