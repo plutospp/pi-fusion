@@ -817,6 +817,20 @@ export function getCriticLens(index: number, count: number): CriticLens {
 
 const CRITIC_TOOL_GUIDANCE = "Tool access: read-only tools only. Do not modify files or run write-capable commands.";
 
+/** Critics only evaluate; they never need write-capable tools. */
+export const CRITIC_TOOLS = ["read", "grep", "find", "ls"];
+
+export type CriticSkipReason = "off" | "no completed workers";
+export type CriticStagePlan = { run: false; reason: CriticSkipReason } | { run: true; lenses: CriticLens[] };
+
+/** Decides whether the critic stage runs and which lens each critic gets. */
+export function planCriticStage(settings: Pick<FusionSettings, "criticEnabled" | "criticCount">, workerResults: WorkerResult[]): CriticStagePlan {
+  if (!settings.criticEnabled) return { run: false, reason: "off" };
+  if (!workerResults.some((result) => result.ok)) return { run: false, reason: "no completed workers" };
+  const count = Math.max(1, Math.min(settings.criticCount, MAX_CRITICS));
+  return { run: true, lenses: Array.from({ length: count }, (_, index) => getCriticLens(index, count)) };
+}
+
 // Set on every fusion sub-agent process. pi-fusion's own activation no-ops when
 // it sees this, so sub-agents still load the user's other extensions but never
 // recursively re-arm fusion.

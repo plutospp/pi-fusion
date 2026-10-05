@@ -23,7 +23,7 @@ import {
   FUSION_ARCHIVE_ENTRY_TYPE,
   FUSION_SUBAGENT_ENV,
   FUSION_TRACE_MESSAGE_TYPE,
-  getCriticLens,
+  CRITIC_TOOLS,
   listFusionArchiveRuns,
   reconstructFusionArchive,
   fusionStatusGlyph,
@@ -31,6 +31,7 @@ import {
   normalizePlannerToolMode,
   normalizeWorkerSlots,
   parsePromptVariations,
+  planCriticStage,
   resolveSettings,
   resolveCriticModel,
   resolveCriticThinking,
@@ -835,19 +836,19 @@ export default function piFusion(pi: ExtensionAPI): void {
       const workerResults = await Promise.all(workerPromises);
       if (abort.signal.aborted) return undefined;
 
+      const criticPlan = planCriticStage(settings, workerResults);
       let criticResults: WorkerResult[] | undefined;
-      if (settings.criticEnabled && settings.criticCount > 0) {
+      if (criticPlan.run) {
         activePanel?.close();
         activePanel = undefined;
 
-        const criticIndices = Array.from({ length: settings.criticCount }, (_, i) => i);
-        const criticStatusLines = criticIndices.map((_, index) => `○ critic ${index + 1}: ${getCriticLens(index, settings.criticCount).focus}`);
+        const lenses = criticPlan.lenses;
+        const criticStatusLines = lenses.map((lens, index) => `○ critic ${index + 1}: ${lens.focus}`);
         setFusionStatus(ctx, criticStatusLines);
-
-        const criticStates: FusionLiveWorkerState[] = criticIndices.map((_, index) => ({
+        const criticStates: FusionLiveWorkerState[] = lenses.map((lens, index) => ({
           index,
-          label: `critic ${getCriticLens(index, settings.criticCount).name}`,
-          lens: "critic",
+          label: `critic ${lens.name}`,
+          lens: lens.focus,
           status: "queued" as const,
           output: "",
           reasoning: "",
@@ -857,39 +858,37 @@ export default function piFusion(pi: ExtensionAPI): void {
 
         const criticModel = resolveCriticModel(settings, currentModel);
         const criticThinking = resolveCriticThinking(settings, pi.getThinkingLevel());
-
-        const criticPromises = criticIndices.map(async (index) => {
-          const lens = getCriticLens(index, settings.criticCount);
-          const prompt = buildCriticPrompt({
-            task,
-            recentContext,
-            discoveryContext,
-            promptVariations: settings.rewriteEnabled ? promptVariations : [],
-            workerResults,
-            workerOutputBytes: settings.workerOutputBytes,
-            cwd: ctx.cwd,
-            lens,
-            template: prompts.critic,
-          });
-          activePanel?.update(index, { status: "running" });
-          const result = await runWorker({
-            prompt,
-            cwd: ctx.cwd,
-            index,
-            lens: lens.name,
-            timeoutMs: settings.timeoutMs,
-            model: criticModel,
-            thinkingLevel: criticThinking,
-            tools: plannerToolsForMode(settings),
-            signal: abort.signal,
-            onLiveUpdate: (criticIndex, patch) => activePanel?.update(criticIndex, patch),
-          });
-          criticStatusLines[index] = `${result.ok ? "●" : "⊘"} critic ${index + 1}: ${lens.name}`;
-          setFusionStatus(ctx, criticStatusLines);
-          return result;
-        });
-
-        criticResults = await Promise.all(criticPromises);
+        criticResults = await Promise.all(
+          lenses.map(async (lens, index) => {
+            const prompt = buildCriticPrompt({
+              task,
+              recentContext,
+              discoveryContext,
+              promptVariations: settings.rewriteEnabled ? promptVariations : [],
+              workerResults,
+              workerOutputBytes: settings.workerOutputBytes,
+              cwd: ctx.cwd,
+              lens,
+              template: prompts.critic,
+            });
+            activePanel?.update(index, { status: "running" });
+            const result = await runWorker({
+              prompt,
+              cwd: ctx.cwd,
+              index,
+              lens: lens.focus,
+              timeoutMs: settings.timeoutMs,
+              model: criticModel,
+              thinkingLevel: criticThinking,
+              tools: CRITIC_TOOLS,
+              signal: abort.signal,
+              onLiveUpdate: (criticIndex, patch) => activePanel?.update(criticIndex, patch),
+            });
+            criticStatusLines[index] = `${result.ok ? "●" : "⊘"} critic ${index + 1}: ${lens.focus}`;
+            setFusionStatus(ctx, criticStatusLines);
+            return result;
+          }),
+        );
         if (abort.signal.aborted) return undefined;
       }
 

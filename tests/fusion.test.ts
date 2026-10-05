@@ -28,6 +28,7 @@ import {
   listFusionArchiveRuns,
   normalizeWorkerSlots,
   parsePromptVariations,
+  planCriticStage,
   reconstructFusionArchive,
   resolveSettings,
   resolveCriticModel,
@@ -36,8 +37,10 @@ import {
   resolveWorkerThinking,
   shouldBypassFusion,
   truncateUtf8,
+  CRITIC_TOOLS,
   FUSION_ARCHIVE_ENTRY_TYPE,
   FUSION_TRACE_MESSAGE_TYPE,
+  MAX_CRITICS,
   type WorkerResult,
 } from "../extensions/pi-fusion/fusion.ts";
 
@@ -488,6 +491,28 @@ describe("prompts", () => {
     assert.deepEqual(parsePromptVariations('["a","b","c","d"]', 3, "fallback"), ["a", "b", "c"]);
     assert.deepEqual(parsePromptVariations("1. one\n2. two", 2, "fallback"), ["one", "two"]);
     assert.deepEqual(parsePromptVariations("", 2, "fallback"), ["fallback", "fallback"]);
+  });
+});
+
+describe("critic stage", () => {
+  it("skips critics when they are off or no worker completed", () => {
+    assert.deepEqual(planCriticStage({ criticEnabled: false, criticCount: 2 }, [worker()]), { run: false, reason: "off" });
+    assert.deepEqual(planCriticStage({ criticEnabled: true, criticCount: 2 }, [worker({ ok: false })]), {
+      run: false,
+      reason: "no completed workers",
+    });
+  });
+
+  it("plans one distinct lens per critic, capped at MAX_CRITICS", () => {
+    const plan = planCriticStage({ criticEnabled: true, criticCount: 8 }, [worker()]);
+    assert.equal(plan.run, true);
+    if (!plan.run) return;
+    assert.equal(plan.lenses.length, MAX_CRITICS);
+    assert.equal(new Set(plan.lenses.map((lens) => lens.focus)).size, MAX_CRITICS);
+  });
+
+  it("gives critics read-only tools", () => {
+    assert.ok(buildWorkerArgs({ promptFile: "/tmp/c.md", tools: CRITIC_TOOLS }).join(" ").includes("--tools read,grep,find,ls"));
   });
 });
 
