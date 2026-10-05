@@ -173,7 +173,7 @@ Open the settings pane:
 | Rewrite        | Toggles prompt rewriting before worker fanout.                 |
 | Critics        | Toggles critics, picks model and reasoning effort.             |
 | Synthesis      | Picks the synthesis model and reasoning effort.                |
-| Save and close | Persists settings in the pi session.                           |
+| Save and close | Persists settings in the pi session (kept on resume).          |
 
 Presets are user-defined snapshots of the settings pane. There are no built-in
 profiles, because those would go stale and hide assumptions. Save your own from
@@ -211,6 +211,8 @@ current, off, minimal, low, medium, high, xhigh
 ## Prompt Customization
 
 You can fully customize all the prompts used by `pi-fusion`. On first run, default prompts are automatically written to your global `fusion.yml` file (`~/.pi/agent/fusion.yml`). You can see and edit them there, or override them on a per-project basis. Existing `fusion.json` files remain supported.
+
+Saved prompts do not update when pi-fusion's defaults change. Delete a prompt from the file to use the current default for it. If you delete the whole `prompts` key, pi-fusion writes the current defaults again on the next start.
 
 ### Where prompts are stored
 
@@ -400,6 +402,11 @@ itself. `--fusion-model` remains as a backwards-compatible alias for `--fusion-w
 `--fusion-preset NAME` to load a preset from `~/.pi/agent/fusion.yml` or `.pi/fusion.yml` at
 startup. Planner subprocesses get all tools by default; use `/fusion tools read-only` or
 `--fusion-planner-tools read-only` to restore the original narrow read/search/list tool set.
+Critics always get read-only tools.
+
+In a resumed session, saved settings are kept. Value flags you pass (counts, models, reasoning,
+byte budgets, timeout, tools) override them. Saved on/off choices win over `--fusion-enabled` and
+the `--fusion-no-*` flags, but `--fusion-disabled` always turns fusion off.
 
 ## What gets sent where
 
@@ -414,6 +421,7 @@ When fusion is armed, the next idle, non-command user input consumes that arm an
 - gives query rewriting no tools;
 - injects shared discovery context into every worker prompt;
 - asks workers for concise planning markdown;
+- when critics are on, replaces the worker splits with live critic splits and runs the critics in parallel with read-only tools (`read`, `grep`, `find`, `ls`); each critic sees the shared discovery context, the worker prompt variations (when rewrite is on), and the completed worker outputs; critics are skipped when no worker completed;
 - inserts the final planning bundle into the synthesis turn's system prompt via `before_agent_start`.
 
 The user's message stays untouched in the session. `/tree` and `/fork` still show the original
@@ -459,30 +467,31 @@ These skips keep the extension predictable and avoid recursion.
 
 ## Context budget
 
-Worker output inserted into the synthesis turn is capped per worker (`fusion-output-bytes`, default
-`12000`). Recent conversation context sent to discovery and workers is capped separately
+Worker and critic output inserted downstream is capped per sub-agent (`fusion-output-bytes`, default
+`12000`). Recent conversation context sent to discovery, workers, and critics is capped separately
 (`fusion-context-bytes`, default `16000`). Discovery tool-result context is bounded before being
 shared downstream.
 
 Three byte budgets keep the three audiences separate:
 
-- `fusion-output-bytes` (default `12000`) — worker output inserted into the synthesis turn's prompt.
+- `fusion-output-bytes` (default `12000`) — each worker's output in the critic and synthesis prompts,
+  and each critic's output in the synthesis prompt.
 - `fusion-resume-bytes` (default `8000`) — worker conclusions kept in context for resumed and
   subsequent turns (the durable handoff).
-- `fusion-context-bytes` (default `16000`) — recent conversation sent down to discovery and workers.
+- `fusion-context-bytes` (default `16000`) — recent conversation sent down to discovery, workers, and critics.
 
-Full worker transcripts are stored in the session file as non-context archive entries (see
+Full worker and critic transcripts are stored in the session file as non-context archive entries (see
 [Session archive & resume](#session-archive--resume)). They are recoverable via `/fusion-transcript`
 but never enter the context window automatically.
 
 ## Rough edges
 
-- Discovery, rewrite, and worker planning block the turn until the fanout finishes, times out, or
-  you cancel with `Esc`.
-- Discovery and workers are subprocesses, not true pi session forks. They receive a truncated text
+- Discovery, rewrite, worker planning, and critics block the turn until the fanout finishes, times
+  out, or you cancel with `Esc`.
+- Discovery, workers, and critics are subprocesses, not true pi session forks. They receive a truncated text
   snapshot of recent conversation. Their full output is archived into the parent session afterward
   rather than as live sub-sessions.
-- Discovery and workers do not see attached images.
+- Discovery, workers, and critics do not see attached images.
 - Worker subprocesses load normal pi context files such as `AGENTS.md` and your installed extensions; only pi-fusion stays inert inside them (gated by `PI_FUSION_SUBAGENT`).
 - The live split pane only appears in TUI mode. Print, JSON, and RPC modes still run fusion without
   that UI.
@@ -491,8 +500,8 @@ but never enter the context window automatically.
 - Malformed `fusion.yml`, `fusion.yaml`, or `fusion.json` files are ignored instead of crashing the extension; fix the config syntax if presets or prompts are missing unexpectedly.
 - Some providers hide reasoning streams, so a worker column may show no reasoning even with
   reasoning enabled.
-- Discovery and worker tool access defaults to all tools. Use read-only planner tools for safer planning passes when you do not want subprocesses to run write-capable tools.
-- The current pipeline uses two LLM round trips before the synthesis turn. A lighter mode may exist
+- Discovery and worker tool access defaults to all tools. Use read-only planner tools for safer planning passes when you do not want subprocesses to run write-capable tools. Critics always run read-only.
+- The current pipeline uses two LLM round trips before the synthesis turn (three with critics). A lighter mode may exist
   later, but the explicit flow is better for testing right now.
 
 ## Development
