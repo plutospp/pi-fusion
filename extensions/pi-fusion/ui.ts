@@ -150,20 +150,6 @@ const PICKER_PANE_MAX_HEIGHT = 26;
 
 class FusionPane {
   private selected = 0;
-  private readonly rows = [
-    "enabled",
-    "goa",
-    "goaRounds",
-    "goaThreshold",
-    "goaTopK",
-    "tools",
-    "presets",
-    "workers",
-    "discovery",
-    "rewrite",
-    "synthesis",
-    "save",
-  ] as const;
 
   constructor(
     private readonly theme: Theme,
@@ -171,6 +157,19 @@ class FusionPane {
     private readonly done: (result: FusionPaneResult) => void,
     private readonly onToggleEnabled?: (enabled: boolean) => void,
   ) {}
+
+  private getActiveRows(): Array<
+    "enabled" | "goa" | "goaRounds" | "goaThreshold" | "goaTopK" | "tools" | "presets" | "workers" | "discovery" | "rewrite" | "synthesis" | "save"
+  > {
+    const base: Array<
+      "enabled" | "goa" | "goaRounds" | "goaThreshold" | "goaTopK" | "tools" | "presets" | "workers" | "discovery" | "rewrite" | "synthesis" | "save"
+    > = ["enabled", "goa"];
+    if (this.settings.goaEnabled) {
+      base.push("goaRounds", "goaThreshold", "goaTopK");
+    }
+    base.push("tools", "presets", "workers", "discovery", "rewrite", "synthesis", "save");
+    return base;
+  }
 
   private toggleEnabled(): void {
     this.settings.enabled = !this.settings.enabled;
@@ -183,16 +182,22 @@ class FusionPane {
       return;
     }
 
+    const rows = this.getActiveRows();
+    if (this.selected >= rows.length) {
+      this.selected = rows.length - 1;
+    }
+
     if (matchesKey(data, "up")) {
-      this.selected = (this.selected - 1 + this.rows.length) % this.rows.length;
+      this.selected = (this.selected - 1 + rows.length) % rows.length;
       return;
     }
     if (matchesKey(data, "down")) {
-      this.selected = (this.selected + 1) % this.rows.length;
+      this.selected = (this.selected + 1) % rows.length;
       return;
     }
 
-    const row = this.rows[this.selected];
+    const row = rows[this.selected];
+    if (!row) return;
     if (matchesKey(data, "left")) {
       this.adjust(row, -1);
       return;
@@ -273,7 +278,22 @@ class FusionPane {
 
   invalidate(): void {}
 
-  private adjust(row: (typeof this.rows)[number], delta: -1 | 1): void {
+  private adjust(
+    row:
+      | "enabled"
+      | "goa"
+      | "goaRounds"
+      | "goaThreshold"
+      | "goaTopK"
+      | "tools"
+      | "presets"
+      | "workers"
+      | "discovery"
+      | "rewrite"
+      | "synthesis"
+      | "save",
+    delta: -1 | 1,
+  ): void {
     if (row === "enabled") {
       this.toggleEnabled();
     } else if (row === "goa") {
@@ -300,8 +320,26 @@ class FusionPane {
     }
   }
 
-  private renderSettingRow(row: (typeof this.rows)[number], label: string, value: string, hint: string): string {
-    const isSelected = this.rows[this.selected] === row;
+  private renderSettingRow(
+    row:
+      | "enabled"
+      | "goa"
+      | "goaRounds"
+      | "goaThreshold"
+      | "goaTopK"
+      | "tools"
+      | "presets"
+      | "workers"
+      | "discovery"
+      | "rewrite"
+      | "synthesis"
+      | "save",
+    label: string,
+    value: string,
+    hint: string,
+  ): string {
+    const activeRows = this.getActiveRows();
+    const isSelected = activeRows[this.selected] === row;
     const prefix = isSelected ? this.theme.fg("accent", "▶") : " ";
     const labelText = isSelected ? this.theme.fg("accent", label) : this.theme.fg("text", label);
     const labelWidth = 16;

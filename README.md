@@ -64,7 +64,12 @@ flowchart LR
   R --> W1
   R --> W2
   R --> W3
-  W1 --> A["Synthesis (pi actor turn)"]
+  subgraph GoA ["Graph-of-Agents (Optional)"]
+    W1 <-->|S ↔ T Message Passing| W2
+    W2 <-->|S ↔ T Message Passing| W3
+    W1 <-->|S ↔ T Message Passing| W3
+  end
+  W1 --> A["Synthesis (pi actor turn / Graph Pooling)"]
   W2 --> A
   W3 --> A
   D --> A
@@ -108,6 +113,7 @@ A few useful breadcrumbs:
   sampling can amplify weaker models, sometimes cost-effectively.
 - Wang et al., ["Mixture-of-Agents"](https://arxiv.org/abs/2406.04692), shows multiple LLM agents
   can improve final answer quality when their outputs are aggregated.
+- Yun et al., ["Graph-of-Agents: A Graph-based Framework for Multi-Agent LLM Collaboration"](https://github.com/plutospp/GoA) (ICLR 2026), introduces dynamic graph structuring, edge-threshold pruning, and bidirectional message-passing ($S \to T$ and $T \to S$) rounds among specialized model agents before graph pooling synthesis.
 
 My own evals point in the same direction for a subset of coding tasks: parallel planner calls can be
 cheaper, faster wall-clock, and better than sending everything straight to the biggest model. Not
@@ -158,16 +164,17 @@ Open the settings pane:
 /fusion
 ```
 
-| Row            | What it changes                                                |
-| -------------- | -------------------------------------------------------------- |
-| Next turn      | Arms fusion for the next eligible user prompt, then turns off. |
-| Presets        | Saves the current pane settings, loads saved ones, or deletes. |
-| Workers        | Sets worker count and opens per-worker model settings.         |
-| Agent tools    | Switches discovery/workers between all tools and read-only.    |
-| Discovery      | Picks the context-loading model and reasoning effort.          |
-| Rewrite        | Toggles prompt rewriting before worker fanout.                 |
-| Synthesis      | Picks the synthesis model and reasoning effort.                |
-| Save and close | Persists settings in the pi session.                           |
+| Row             | What it changes                                                |
+| --------------- | -------------------------------------------------------------- |
+| Next turn       | Arms fusion for the next eligible user prompt, then turns off. |
+| Presets         | Saves the current pane settings, loads saved ones, or deletes. |
+| Workers         | Sets worker count and opens per-worker model settings.         |
+| Agent tools     | Switches discovery/workers between all tools and read-only.    |
+| Discovery       | Picks the context-loading model and reasoning effort.          |
+| Rewrite         | Toggles prompt rewriting before worker fanout.                 |
+| Graph-of-Agents | Enables GoA graph message passing, rounds, and threshold.      |
+| Synthesis       | Picks the synthesis model and reasoning effort.                |
+| Save and close  | Persists settings in the pi session.                           |
 
 Presets are user-defined snapshots of the settings pane. There are no built-in
 profiles, because those would go stale and hide assumptions. Save your own from
@@ -301,6 +308,10 @@ This prompt formats the final planning bundle injected into the synthesis turn.
 /fusion preset save-project repo-review
 /fusion preset cheap-planners
 /fusion workers 4
+/fusion goa on
+/fusion goa-rounds 2
+/fusion goa-threshold 0.05
+/fusion goa-top-k 3
 /fusion tools all
 /fusion tools read-only
 /fusion discovery-model anthropic/claude-haiku-4-5
@@ -333,6 +344,10 @@ This prompt formats the final planning bundle injected into the synthesis turn.
 ```bash
 pi --fusion-enabled
 pi --fusion-disabled
+pi --fusion-goa
+pi --fusion-goa-rounds 2
+pi --fusion-goa-threshold 0.05
+pi --fusion-goa-top-k 3
 pi --fusion-preset cheap-planners
 pi --fusion-workers 3
 pi --fusion-planner-tools all

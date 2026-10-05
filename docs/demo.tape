@@ -16,8 +16,11 @@ Type "/fusion"
 Enter
 Sleep 2s
 Type " "
-Sleep 4.5s
-Down 6
+Sleep 1s
+Down 1
+Type " "
+Sleep 3.5s
+Down 9
 Sleep 500ms
 Enter
 Sleep 2.5s
