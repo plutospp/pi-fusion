@@ -183,6 +183,17 @@ project presets live in `.pi/fusion.yml` and override global presets with the
 same name. Existing `fusion.json` files still load. See [docs/presets.md](docs/presets.md)
 for the full format and examples.
 
+### Assigning models and reasoning effort to panes
+
+You can assign different models and reasoning effort levels to each stage (pane) in the pipeline:
+
+- **Discovery pane:** Set model via `/fusion discovery-model SPEC` or `--fusion-discovery-model SPEC`. Set reasoning effort via `/fusion discovery-thinking LEVEL`.
+- **Worker pane:**
+  - Set default worker model via `/fusion worker-model SPEC` or `--fusion-worker-model SPEC`.
+  - Set per-worker models via the `/fusion` UI → **Workers** → **configure ▸**. In the per-worker pane, you can assign individual models and reasoning levels to worker `#1`, `#2`, etc.
+- **Integrator pane:** Set model via `/fusion integrator-model SPEC` or `--fusion-integrator-model SPEC`. Set reasoning effort via `/fusion integrator-thinking LEVEL`.
+- **Synthesis turn:** Set model via `/fusion synthesis-model SPEC` or `--fusion-synthesis-model SPEC`. Set reasoning effort via `/fusion synthesis-thinking LEVEL`.
+
 The status bar uses a compact union marker: `∪̸` means fusion is off, and `∪` means the next eligible
 turn is armed.
 
