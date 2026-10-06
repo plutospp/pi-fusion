@@ -36,8 +36,8 @@ Open pi and turn it on from the settings pane:
 
 **pi-fusion adds a planning fanout to pi.** Before the normal pi turn starts, it runs an
 (optional) discovery agent, rewrites variations of the prompt into complementary angles, fans out to
-planner workers, optionally reviews their plans with read-only critics, then injects their notes and
-critiques back into the main thread, that acts as a synthesis step.
+planner workers, evaluates worker plans with multiple critics, then injects their notes and critiques
+back into the main thread, that acts as a synthesis step.
 
 Combining independent model responses has been shown to outscore the individual frontier models on
 many benchmarks. Because independent passes behave differently, the synthesis model can reuse the
@@ -65,21 +65,25 @@ flowchart LR
   R --> W1
   R --> W2
   R --> W3
-  W1 --> C["Critics (optional, 1-4)"]
-  W2 --> C
-  W3 --> C
+  W1 --> C1["Critic #1 (optional)"]
+  W2 --> C1
+  W3 --> C1
+  W1 --> C2["Critic #2 (optional)"]
+  W2 --> C2
+  W3 --> C2
   W1 --> A["Synthesis (pi actor turn)"]
   W2 --> A
   W3 --> A
-  C --> A
+  C1 --> A
+  C2 --> A
   D --> A
   A --> O([One final turn])
   classDef solid fill:#0E481F,stroke:#0E481F,color:#EEF3EA;
   classDef outline fill:#E7ECE6,stroke:#0E481F,color:#0E481F;
   classDef pill fill:#E3E2DC,stroke:#C7C7C0,color:#16301F;
   class U,O pill;
-  class D,W1,W2,W3,A solid;
-  class R,C outline;
+  class D,W1,W2,W3,C1,C2,A solid;
+  class R outline;
 ```
 
 ## Why this exists
@@ -171,9 +175,9 @@ Open the settings pane:
 | Agent tools    | Switches discovery/workers between all tools and read-only.    |
 | Discovery      | Picks the context-loading model and reasoning effort.          |
 | Rewrite        | Toggles prompt rewriting before worker fanout.                 |
-| Critics        | Toggles critics, picks model and reasoning effort.             |
+| Critics        | Toggles critic layer, picks model and reasoning effort.        |
 | Synthesis      | Picks the synthesis model and reasoning effort.                |
-| Save and close | Persists settings in the pi session (kept on resume).          |
+| Save and close | Persists settings in the pi session.                           |
 
 Presets are user-defined snapshots of the settings pane. There are no built-in
 profiles, because those would go stale and hide assumptions. Save your own from
@@ -211,8 +215,6 @@ current, off, minimal, low, medium, high, xhigh
 ## Prompt Customization
 
 You can fully customize all the prompts used by `pi-fusion`. On first run, default prompts are automatically written to your global `fusion.yml` file (`~/.pi/agent/fusion.yml`). You can see and edit them there, or override them on a per-project basis. Existing `fusion.json` files remain supported.
-
-Saved prompts do not update when pi-fusion's defaults change. Delete a prompt from the file to use the current default for it. If you delete the whole `prompts` key, pi-fusion writes the current defaults again on the next start.
 
 ### Where prompts are stored
 
@@ -286,26 +288,14 @@ This prompt runs on each parallel worker.
 
 #### 4. Critic Prompt (`prompts.critic`)
 
-This prompt runs on each critic after the workers finish. Critics run in parallel with read-only
-tools (`read`, `grep`, `find`, `ls`). One critic (the default) does a general review. With 2-4
-critics (`/fusion critics N`), each critic gets one focus: correctness, risk, completeness, and
-simplicity. Critics are skipped when no worker completed. `--fusion-output-bytes` also limits each
-critic's output in the synthesis prompt.
+This prompt runs on each critic agent evaluating worker outputs.
 
 - **Placeholders:**
-  - `{{discoveryContext}}`: Pre-formatted shared discovery context (same as the workers get).
-  - `{{recentContext}}`: Pre-formatted recent conversation history.
-  - `{{task}}`: Your original prompt.
-  - `{{variations}}`: List of worker prompt variations (if rewrite is on).
-  - `{{workerOutputs}}`: Completed worker outputs, plus a note that names failed workers.
-  - `{{criticName}}`: Critic number (e.g. `#1`, `#2`).
-  - `{{criticFocus}}`: The critic's focus (`general`, `correctness`, `risk`, `completeness`, or `simplicity`).
-  - `{{criticBrief}}`: What the critic should look for, for its focus.
-  - `{{toolGuidance}}`: Read-only tool guidance.
   - `{{cwd}}`: Working directory of your project.
-
-The default prompt puts the shared parts first and the critic role last, so all critics share the
-same prompt start (providers with prefix caching can reuse it).
+  - `{{task}}`: Your original prompt.
+  - `{{criticName}}`: Critic index/name (e.g. `Critic #1`, `Critic #2`).
+  - `{{workerOutputs}}`: Formatted worker outputs/plans to be evaluated.
+  - `{{recentContext}}`: Pre-formatted recent conversation history.
 
 #### 5. Synthesis Prompt (`prompts.synthesis`)
 
@@ -316,12 +306,8 @@ This prompt formats the final planning bundle injected into the synthesis turn.
   - `{{discoveryContext}}`: Context loaded by the discovery agent.
   - `{{variations}}`: List of worker prompt variations.
   - `{{workerOutputs}}`: Outputs and plans produced by each worker.
-  - `{{criticOutputsSection}}`: Pre-formatted critic evaluations section, with a note to verify critic findings.
+  - `{{criticOutputsSection}}`: Pre-formatted critic evaluations section.
   - `{{criticOutputs}}`: Critic evaluations produced by critic agents.
-
-  If critics ran but the template has neither critic placeholder (for example, a template saved by an
-  older pi-fusion version), pi-fusion adds the critic section before `## Synthesis instructions`, or at
-  the end.
   - `{{imageNote}}`: A note telling the synthesis step that workers did not see attached images (if any).
 
 > 💡 **Important:** The synthesis prompt template should contain `<!-- pi-fusion:synthesis-prompt -->` so that subsequent conversation turns know a fused turn has finished and bypass fusion automatically. If a custom synthesis prompt omits it, pi-fusion prepends the marker defensively.
@@ -402,11 +388,6 @@ itself. `--fusion-model` remains as a backwards-compatible alias for `--fusion-w
 `--fusion-preset NAME` to load a preset from `~/.pi/agent/fusion.yml` or `.pi/fusion.yml` at
 startup. Planner subprocesses get all tools by default; use `/fusion tools read-only` or
 `--fusion-planner-tools read-only` to restore the original narrow read/search/list tool set.
-Critics always get read-only tools.
-
-In a resumed session, saved settings are kept. Value flags you pass (counts, models, reasoning,
-byte budgets, timeout, tools) override them. Saved on/off choices win over `--fusion-enabled` and
-the `--fusion-no-*` flags, but `--fusion-disabled` always turns fusion off.
 
 ## What gets sent where
 
@@ -421,7 +402,6 @@ When fusion is armed, the next idle, non-command user input consumes that arm an
 - gives query rewriting no tools;
 - injects shared discovery context into every worker prompt;
 - asks workers for concise planning markdown;
-- when critics are on, replaces the worker splits with live critic splits and runs the critics in parallel with read-only tools (`read`, `grep`, `find`, `ls`); each critic sees the shared discovery context, the worker prompt variations (when rewrite is on), and the completed worker outputs; critics are skipped when no worker completed;
 - inserts the final planning bundle into the synthesis turn's system prompt via `before_agent_start`.
 
 The user's message stays untouched in the session. `/tree` and `/fork` still show the original
@@ -467,31 +447,30 @@ These skips keep the extension predictable and avoid recursion.
 
 ## Context budget
 
-Worker and critic output inserted downstream is capped per sub-agent (`fusion-output-bytes`, default
-`12000`). Recent conversation context sent to discovery, workers, and critics is capped separately
+Worker output inserted into the synthesis turn is capped per worker (`fusion-output-bytes`, default
+`12000`). Recent conversation context sent to discovery and workers is capped separately
 (`fusion-context-bytes`, default `16000`). Discovery tool-result context is bounded before being
 shared downstream.
 
 Three byte budgets keep the three audiences separate:
 
-- `fusion-output-bytes` (default `12000`) — each worker's output in the critic and synthesis prompts,
-  and each critic's output in the synthesis prompt.
+- `fusion-output-bytes` (default `12000`) — worker output inserted into the synthesis turn's prompt.
 - `fusion-resume-bytes` (default `8000`) — worker conclusions kept in context for resumed and
   subsequent turns (the durable handoff).
-- `fusion-context-bytes` (default `16000`) — recent conversation sent down to discovery, workers, and critics.
+- `fusion-context-bytes` (default `16000`) — recent conversation sent down to discovery and workers.
 
-Full worker and critic transcripts are stored in the session file as non-context archive entries (see
+Full worker transcripts are stored in the session file as non-context archive entries (see
 [Session archive & resume](#session-archive--resume)). They are recoverable via `/fusion-transcript`
 but never enter the context window automatically.
 
 ## Rough edges
 
-- Discovery, rewrite, worker planning, and critics block the turn until the fanout finishes, times
-  out, or you cancel with `Esc`.
-- Discovery, workers, and critics are subprocesses, not true pi session forks. They receive a truncated text
+- Discovery, rewrite, and worker planning block the turn until the fanout finishes, times out, or
+  you cancel with `Esc`.
+- Discovery and workers are subprocesses, not true pi session forks. They receive a truncated text
   snapshot of recent conversation. Their full output is archived into the parent session afterward
   rather than as live sub-sessions.
-- Discovery, workers, and critics do not see attached images.
+- Discovery and workers do not see attached images.
 - Worker subprocesses load normal pi context files such as `AGENTS.md` and your installed extensions; only pi-fusion stays inert inside them (gated by `PI_FUSION_SUBAGENT`).
 - The live split pane only appears in TUI mode. Print, JSON, and RPC modes still run fusion without
   that UI.
@@ -500,8 +479,8 @@ but never enter the context window automatically.
 - Malformed `fusion.yml`, `fusion.yaml`, or `fusion.json` files are ignored instead of crashing the extension; fix the config syntax if presets or prompts are missing unexpectedly.
 - Some providers hide reasoning streams, so a worker column may show no reasoning even with
   reasoning enabled.
-- Discovery and worker tool access defaults to all tools. Use read-only planner tools for safer planning passes when you do not want subprocesses to run write-capable tools. Critics always run read-only.
-- The current pipeline uses two LLM round trips before the synthesis turn (three with critics). A lighter mode may exist
+- Discovery and worker tool access defaults to all tools. Use read-only planner tools for safer planning passes when you do not want subprocesses to run write-capable tools.
+- The current pipeline uses two LLM round trips before the synthesis turn. A lighter mode may exist
   later, but the explicit flow is better for testing right now.
 
 ## Development

@@ -76,8 +76,6 @@ export interface WorkerLens {
 
 export interface CriticLens {
   name: string;
-  focus: string;
-  brief: string;
 }
 
 export interface WorkerResult {
@@ -154,7 +152,7 @@ export const DEFAULT_SETTINGS: FusionSettings = {
   rewriteEnabled: true,
   criticEnabled: true,
   workerCount: 3,
-  criticCount: 1,
+  criticCount: 2,
   workers: [],
   workerOutputBytes: 12_000,
   contextBytes: 16_000,
@@ -270,9 +268,9 @@ export function resolveSettings(flags: FusionFlags = {}, persisted?: PersistedFu
     settings.workerCount = parsePositiveInteger(String(settings.workerCount), settings.workerCount, { min: 1, max: 8 });
   }
   if (flags["fusion-critics"] !== undefined) {
-    settings.criticCount = parsePositiveInteger(flags["fusion-critics"], settings.criticCount, { min: 1, max: MAX_CRITICS });
+    settings.criticCount = parsePositiveInteger(flags["fusion-critics"], settings.criticCount, { min: 1, max: 8 });
   } else {
-    settings.criticCount = parsePositiveInteger(String(settings.criticCount), settings.criticCount, { min: 1, max: MAX_CRITICS });
+    settings.criticCount = parsePositiveInteger(String(settings.criticCount), settings.criticCount, { min: 1, max: 8 });
   }
   settings.workerOutputBytes = parsePositiveInteger(flags["fusion-output-bytes"], settings.workerOutputBytes, {
     min: 1_000,
@@ -445,7 +443,7 @@ export function buildResumeHandoff(input: {
   maxBytes: number;
 }): string {
   const statusParts = [input.discoveryStatus, input.rewriteStatus];
-  if (input.criticStatus) statusParts.push(input.criticStatus);
+  if (input.criticStatus && input.criticStatus !== "critic skipped") statusParts.push(input.criticStatus);
   const headline = `∪ pi-fusion transcript: ${statusParts.join("; ")}; ${input.completedWorkers}/${input.totalWorkers} workers completed.`;
   const pointer = input.runId
     ? `Parallel sub-agents produced this answer. Their full transcripts are archived in this pi session (run ${input.runId}) and are intentionally kept out of context. Run \`/fusion-transcript ${input.runId}\` to inspect them.`
@@ -466,10 +464,10 @@ export function buildResumeHandoff(input: {
   return `${headline}\n\n${pointer}\n\n## Worker conclusions\n${bounded}`;
 }
 
-function criticStatusLabel(results?: WorkerResult[], skipReason?: CriticSkipReason): string | undefined {
-  if (skipReason === "no completed workers") return "critics skipped (no completed workers)";
-  if (!results || results.length === 0) return undefined;
-  return `critics ${results.filter((result) => result.ok).length}/${results.length} completed`;
+function criticStatusLabel(results?: WorkerResult[]): string {
+  if (!results || results.length === 0) return "critic skipped";
+  const completed = results.filter((r) => r.ok).length;
+  return `critic completed (${completed}/${results.length})`;
 }
 
 export function buildFusionTraceMessage(input: {
@@ -482,7 +480,6 @@ export function buildFusionTraceMessage(input: {
   rewriteResult?: WorkerResult;
   workerResults: WorkerResult[];
   criticResults?: WorkerResult[];
-  criticSkipReason?: CriticSkipReason;
   runId?: string;
   archiveChunks?: number;
   archiveBytes?: number;
@@ -491,7 +488,7 @@ export function buildFusionTraceMessage(input: {
   const completedWorkers = input.workerResults.filter((result) => result.ok).length;
   const discoveryStatus = discoveryStatusLabel(input.discoveryResult);
   const rewriteStatus = rewriteStatusLabel(input.rewriteResult);
-  const criticStatus = criticStatusLabel(input.criticResults, input.criticSkipReason);
+  const criticStatus = criticStatusLabel(input.criticResults);
 
   return {
     customType: FUSION_TRACE_MESSAGE_TYPE,
@@ -580,9 +577,6 @@ export interface FusionArchiveManifest {
   rewriteEnabled: boolean;
   workerCount: number;
   completedWorkers: number;
-  /** Optional so archives written before the critic stage stay valid. */
-  criticCount?: number;
-  completedCritics?: number;
   chunks: number;
   bytes: number;
 }
@@ -721,8 +715,6 @@ export function buildFusionArchiveEntries(input: FusionArchiveInput): {
     rewriteEnabled: input.rewriteEnabled,
     workerCount: input.workerResults.length,
     completedWorkers: input.workerResults.filter((result) => result.ok).length,
-    criticCount: (input.criticResults ?? []).length,
-    completedCritics: (input.criticResults ?? []).filter((result) => result.ok).length,
     chunks: pieces.length,
     bytes: Buffer.byteLength(transcript, "utf8"),
   };
@@ -787,54 +779,8 @@ export function getWorkerLens(index: number): WorkerLens {
   return { name: `#${index + 1}` };
 }
 
-const CRITIC_FOCUSES: ReadonlyArray<Omit<CriticLens, "name">> = [
-  {
-    focus: "correctness",
-    brief:
-      "Check the plans against the code and the facts. Find wrong assumptions about files, APIs, behavior, or commands. Verify important claims with your tools.",
-  },
-  {
-    focus: "risk",
-    brief: "Find what could break: data loss, security, breaking changes, concurrency, migrations, and missing rollback or safety checks.",
-  },
-  {
-    focus: "completeness",
-    brief: "Find missing requirements, edge cases, tests, and verification steps. Check that the plans cover the whole request.",
-  },
-  {
-    focus: "simplicity",
-    brief: "Find over-engineering and scope creep. Name the smallest change that meets the request.",
-  },
-];
-
-const GENERAL_CRITIC_FOCUS: Omit<CriticLens, "name"> = {
-  focus: "general",
-  brief: "Review correctness, risk, completeness, and simplicity. Report the most important problems first.",
-};
-
-/** One focus per critic, so more critics than focuses would only repeat a focus. */
-export const MAX_CRITICS = CRITIC_FOCUSES.length;
-
-/** One critic does a general review. Two or more critics each get a different focus. */
-export function getCriticLens(index: number, count: number): CriticLens {
-  const focus = count <= 1 ? GENERAL_CRITIC_FOCUS : CRITIC_FOCUSES[index % CRITIC_FOCUSES.length];
-  return { name: `#${index + 1}`, ...focus };
-}
-
-const CRITIC_TOOL_GUIDANCE = "Tool access: read-only tools only. Do not modify files or run write-capable commands.";
-
-/** Critics only evaluate; they never need write-capable tools. */
-export const CRITIC_TOOLS = ["read", "grep", "find", "ls"];
-
-export type CriticSkipReason = "off" | "no completed workers";
-export type CriticStagePlan = { run: false; reason: CriticSkipReason } | { run: true; lenses: CriticLens[] };
-
-/** Decides whether the critic stage runs and which lens each critic gets. */
-export function planCriticStage(settings: Pick<FusionSettings, "criticEnabled" | "criticCount">, workerResults: WorkerResult[]): CriticStagePlan {
-  if (!settings.criticEnabled) return { run: false, reason: "off" };
-  if (!workerResults.some((result) => result.ok)) return { run: false, reason: "no completed workers" };
-  const count = Math.max(1, Math.min(settings.criticCount, MAX_CRITICS));
-  return { run: true, lenses: Array.from({ length: count }, (_, index) => getCriticLens(index, count)) };
+export function getCriticLens(index: number): CriticLens {
+  return { name: `Critic #${index + 1}` };
 }
 
 // Set on every fusion sub-agent process. pi-fusion's own activation no-ops when
@@ -966,38 +912,34 @@ Return concise markdown with these sections:
 
 Keep the result useful for the downstream synthesis step. Do not implement anything.`,
 
-  critic: `{{discoveryContext}}{{recentContext}}## Original user request
+  critic: `You are critic {{criticName}} in an LLM Fusion evaluation pass.
 
-{{task}}{{variations}}
+Your job is to independently evaluate and critique the plans/outputs produced by parallel workers for the user's request. Identify flaws, blind spots, incorrect assumptions, risks, missing edge cases, or contradictions across worker proposals.
+
+Working directory: {{cwd}}
+
+{{recentContext}}## Original user request
+
+{{task}}
 
 ## Worker outputs
 
 {{workerOutputs}}
 
-## Your role
-
-You are critic {{criticName}} in an LLM Fusion review pass. Focus: {{criticFocus}}.
-
-{{criticBrief}}
-
-{{toolGuidance}} Use the shared discovery context first. Read more only to verify a claim.
-
-Working directory: {{cwd}}
-
 ## Output contract
 
-Return concise markdown:
+Return concise markdown with these sections:
 
-1. **Findings** — the most important problems for your focus, most severe first. For each: the worker(s), the problem, the evidence (file:line, command, or quote), and whether you verified it.
-2. **Keep** — worker ideas that hold up under your focus.
-3. **Recommendations for synthesis** — what to keep, reject, or change.
+1. **Evaluation & Strengths** — key insights or viable ideas across worker outputs.
+2. **Critique & Flaws** — specific errors, false assumptions, missing context, or risks in worker plans.
+3. **Recommendations for Synthesis** — what the downstream synthesis step should keep, reject, or modify.
 
-Stay inside your focus. If you find no real problem, say so. Do not invent issues. Do not implement anything.`,
+Do not implement anything. Keep your critique objective, sharp, and useful.`,
 
   synthesis: `<!-- pi-fusion:synthesis-prompt -->
 {{discoveryContext}}# LLM Fusion planning bundle
 
-A discovery agent gathered shared context and parallel workers explored and planned. If critics ran, their reviews follow the worker outputs. Synthesize their advice, verify anything important yourself, then act on the original request using your available tools. Treat all subagent output as advisory, not authoritative.{{imageNote}}
+A discovery agent gathered shared context, parallel workers explored/planned, and critic agents reviewed worker outputs for flaws and tradeoffs. Synthesize their advice, verify anything important yourself, then act on the original request using your available tools. Treat all subagent output as advisory, not authoritative.{{imageNote}}
 
 ## Original user request
 
@@ -1013,7 +955,7 @@ A discovery agent gathered shared context and parallel workers explored and plan
 
 - Act on the original request, not on the workers' or critics' wording.
 - Use shared discovery context before re-reading files; avoid redundant tool calls unless verification or missing context requires them.
-- Use critic findings to find weak points in the plans. Verify a finding before you change course because of it.
+- Consider both worker plans and critic evaluations to resolve contradictions and avoid risks.
 - Keep your visible response natural; do not dump a long meta-synthesis unless the user asked for one.
 - Choose the smallest safe path and execute it.`,
 };
@@ -1133,8 +1075,6 @@ export function buildWorkerPrompt(input: {
 export function buildCriticPrompt(input: {
   task: string;
   recentContext: string;
-  discoveryContext: string;
-  promptVariations: string[];
   workerResults: WorkerResult[];
   workerOutputBytes: number;
   cwd: string;
@@ -1142,35 +1082,19 @@ export function buildCriticPrompt(input: {
   template?: string;
 }): string {
   const templateStr = input.template ?? DEFAULT_PROMPTS.critic;
-  const discoverySection = input.discoveryContext.trim() ? `## Shared discovery context\n\n${input.discoveryContext.trim()}\n\n` : "";
   const recentSection = input.recentContext.trim() ? `## Recent conversation context (truncated)\n\n${input.recentContext.trim()}\n\n` : "";
-  const variations =
-    input.promptVariations.length > 0
-      ? `\n\n## Worker prompt variations\n\n${input.promptVariations.map((variation, index) => `${index + 1}. ${variation}`).join("\n")}`
-      : "";
-  const completed = input.workerResults.filter((result) => result.ok);
-  const failed = input.workerResults.filter((result) => !result.ok);
-  const failedNote =
-    failed.length > 0
-      ? `\n\nNot shown (no usable output): ${failed.map((result) => `Worker ${result.index + 1} (${result.lens}): ${workerStatus(result)}`).join("; ")}.`
-      : "";
-  const workersFormatted = completed.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
+  const workersFormatted = input.workerResults.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
 
   return renderTemplate(templateStr, {
-    discoveryContext: discoverySection,
+    criticName: input.lens.name,
+    cwd: input.cwd,
     recentContext: recentSection,
     task: input.task.trim(),
-    variations,
-    workerOutputs: `${workersFormatted || "(no completed worker outputs)"}${failedNote}`,
-    criticName: input.lens.name,
-    criticFocus: input.lens.focus,
-    criticBrief: input.lens.brief,
-    toolGuidance: CRITIC_TOOL_GUIDANCE,
-    cwd: input.cwd,
+    workerOutputs: workersFormatted || "(no worker outputs)",
   });
 }
 
-function formatAgentForSynthesis(kind: "Worker" | "Critic", result: WorkerResult, maxBytes: number): string {
+export function formatWorkerForSynthesis(result: WorkerResult, maxBytes: number): string {
   const status = result.ok ? "completed" : result.timedOut ? "timed out" : `failed${result.exitCode === null ? "" : ` (${result.exitCode})`}`;
   const diagnostics = result.stderr.trim() && !result.ok ? `\n\nStderr:\n${truncateUtf8(result.stderr.trim(), 2_000)}` : "";
   const usage = result.usage.turns
@@ -1179,31 +1103,19 @@ function formatAgentForSynthesis(kind: "Worker" | "Critic", result: WorkerResult
       ? `\n\nModel: ${result.model}`
       : "";
 
-  return `## ${kind} ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
-}
-
-export function formatWorkerForSynthesis(result: WorkerResult, maxBytes: number): string {
-  return formatAgentForSynthesis("Worker", result, maxBytes);
+  return `## Worker ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
 }
 
 export function formatCriticForSynthesis(result: WorkerResult, maxBytes: number): string {
-  return formatAgentForSynthesis("Critic", result, maxBytes);
-}
+  const status = result.ok ? "completed" : result.timedOut ? "timed out" : `failed${result.exitCode === null ? "" : ` (${result.exitCode})`}`;
+  const diagnostics = result.stderr.trim() && !result.ok ? `\n\nStderr:\n${truncateUtf8(result.stderr.trim(), 2_000)}` : "";
+  const usage = result.usage.turns
+    ? `\n\nUsage: ${result.usage.turns} turn(s), ↑${result.usage.input}, ↓${result.usage.output}, $${result.usage.cost.toFixed(4)}${result.model ? `, ${result.model}` : ""}`
+    : result.model
+      ? `\n\nModel: ${result.model}`
+      : "";
 
-const CRITIC_PLACEHOLDER = /{{\s*criticOutputs(?:Section)?\s*}}/;
-
-const CRITIC_SECTION_PREAMBLE =
-  "Critics reviewed the worker outputs above, each with one focus. Treat each finding as a claim to check, not as a fact, and verify it before you act on it. Findings that several critics repeat are not independent evidence, because all critics read the same worker outputs.";
-
-/**
- * Synthesis templates saved before the critic stage existed (initializeFusionPrompts copies the
- * defaults into the user config) have no critic placeholder. Add one so critic work is not lost.
- */
-function ensureCriticPlaceholder(template: string, hasCritics: boolean): string {
-  if (!hasCritics || CRITIC_PLACEHOLDER.test(template)) return template;
-  const anchor = template.indexOf("## Synthesis instructions");
-  if (anchor === -1) return `${template}\n\n{{criticOutputsSection}}`;
-  return `${template.slice(0, anchor)}{{criticOutputsSection}}\n\n${template.slice(anchor)}`;
+  return `## Critic ${result.index + 1}: ${result.lens} — ${status}\n\n${truncateUtf8(result.output.trim() || "(no output)", maxBytes)}${diagnostics}${usage}`;
 }
 
 export function buildSynthesisPrompt(input: {
@@ -1216,10 +1128,10 @@ export function buildSynthesisPrompt(input: {
   imageCount: number;
   template?: string;
 }): string {
+  const templateStr = input.template ?? DEFAULT_PROMPTS.synthesis;
   const workers = input.workerResults.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
   const criticsFormatted = (input.criticResults ?? []).map((result) => formatCriticForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
-  const templateStr = ensureCriticPlaceholder(input.template ?? DEFAULT_PROMPTS.synthesis, criticsFormatted.length > 0);
-  const criticOutputsSection = criticsFormatted ? `## Critic evaluations\n\n${CRITIC_SECTION_PREAMBLE}\n\n${criticsFormatted}` : "";
+  const criticOutputsSection = criticsFormatted ? `## Critic evaluations\n\n${criticsFormatted}` : "";
 
   const imageNote =
     input.imageCount > 0 ? `\n\nNote: the user attached ${input.imageCount} image(s). Workers did not see images; inspect them yourself.` : "";

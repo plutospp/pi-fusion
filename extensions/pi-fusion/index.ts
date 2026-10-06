@@ -23,7 +23,7 @@ import {
   FUSION_ARCHIVE_ENTRY_TYPE,
   FUSION_SUBAGENT_ENV,
   FUSION_TRACE_MESSAGE_TYPE,
-  CRITIC_TOOLS,
+  getCriticLens,
   listFusionArchiveRuns,
   reconstructFusionArchive,
   fusionStatusGlyph,
@@ -31,7 +31,6 @@ import {
   normalizePlannerToolMode,
   normalizeWorkerSlots,
   parsePromptVariations,
-  planCriticStage,
   resolveSettings,
   resolveCriticModel,
   resolveCriticThinking,
@@ -410,70 +409,87 @@ export default function piFusion(pi: ExtensionAPI): void {
   pi.registerFlag("fusion-workers", {
     description: "Number of parallel pi-fusion workers (1-8, default 3)",
     type: "string",
+    default: String(DEFAULT_SETTINGS.workerCount),
   });
   pi.registerFlag("fusion-critics", {
-    description: "Number of parallel pi-fusion critics (1-4, default 1)",
+    description: "Number of parallel pi-fusion critics (1-8, default 2)",
     type: "string",
+    default: String(DEFAULT_SETTINGS.criticCount),
   });
   pi.registerFlag("fusion-output-bytes", {
-    description: "Max bytes from each worker or critic inserted into downstream prompts",
+    description: "Max bytes from each worker inserted into the synthesis prompt",
     type: "string",
+    default: String(DEFAULT_SETTINGS.workerOutputBytes),
   });
   pi.registerFlag("fusion-context-bytes", {
     description: "Max bytes of recent conversation sent to each worker",
     type: "string",
+    default: String(DEFAULT_SETTINGS.contextBytes),
   });
   pi.registerFlag("fusion-resume-bytes", {
     description: "Max bytes of worker conclusions kept in context for resumed/subsequent turns",
     type: "string",
+    default: String(DEFAULT_SETTINGS.resumeContextBytes),
   });
   pi.registerFlag("fusion-timeout-ms", {
-    description: "Timeout per sub-agent (discovery, worker, critic) in milliseconds",
+    description: "Planner worker timeout in milliseconds",
     type: "string",
+    default: String(DEFAULT_SETTINGS.timeoutMs),
   });
   pi.registerFlag("fusion-model", {
     description: "Alias for --fusion-worker-model",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-discovery-model", {
     description: "Model for the fusion discovery agent, or current/default",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-worker-model", {
     description: "Model for fusion workers, or current/default",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-critic-model", {
     description: "Model for fusion critics, or current/default",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-synthesis-model", {
     description: "Model for the synthesis turn, or current/default",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-critic-thinking", {
     description: "Reasoning effort for fusion critics: current/off/minimal/low/medium/high/xhigh",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-discovery-thinking", {
     description: "Reasoning effort for discovery: current/off/minimal/low/medium/high/xhigh",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-worker-thinking", {
     description: "Reasoning effort for fusion workers: current/off/minimal/low/medium/high/xhigh",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-synthesis-thinking", {
     description: "Reasoning effort for the synthesis turn: current/off/minimal/low/medium/high/xhigh",
     type: "string",
+    default: "current",
   });
   pi.registerFlag("fusion-planner-tools", {
     description: "Tool access for discovery and planner workers: all/read-only (default all)",
     type: "string",
+    default: DEFAULT_SETTINGS.plannerToolMode,
   });
   pi.registerFlag("fusion-preset", {
     description: "Load a named pi-fusion preset from ~/.pi/agent/fusion.json or .pi/fusion.json",
     type: "string",
+    default: "",
   });
 
   function persist(): void {
@@ -620,7 +636,7 @@ export default function piFusion(pi: ExtensionAPI): void {
       const items = lastTranscriptRuns.map((run) => ({
         value: run.runId,
         label: run.runId,
-        description: `${run.completedWorkers}/${run.workerCount} workers${run.criticCount ? ` • ${run.completedCritics ?? 0}/${run.criticCount} critics` : ""} • ${run.bytes} bytes`,
+        description: `${run.completedWorkers}/${run.workerCount} workers • ${run.bytes} bytes`,
       }));
       const filtered = items.filter((item) => item.value.startsWith(prefix));
       return filtered.length > 0 ? filtered : null;
@@ -644,10 +660,7 @@ export default function piFusion(pi: ExtensionAPI): void {
           return;
         }
         const summary = lastTranscriptRuns
-          .map(
-            (run) =>
-              `${run.runId} (${run.completedWorkers}/${run.workerCount} workers${run.criticCount ? `, ${run.completedCritics ?? 0}/${run.criticCount} critics` : ""}, ${run.bytes} bytes)`,
-          )
+          .map((run) => `${run.runId} (${run.completedWorkers}/${run.workerCount} workers, ${run.bytes} bytes)`)
           .join("\n");
         ctx.ui.notify(`pi-fusion runs in this session:\n${summary}`, "info");
         return;
@@ -822,20 +835,19 @@ export default function piFusion(pi: ExtensionAPI): void {
       const workerResults = await Promise.all(workerPromises);
       if (abort.signal.aborted) return undefined;
 
-      const criticPlan = planCriticStage(settings, workerResults);
-      const criticSkipReason = criticPlan.run ? undefined : criticPlan.reason;
       let criticResults: WorkerResult[] | undefined;
-      if (criticPlan.run) {
+      if (settings.criticEnabled && settings.criticCount > 0) {
         activePanel?.close();
         activePanel = undefined;
 
-        const lenses = criticPlan.lenses;
-        const criticStatusLines = lenses.map((lens, index) => `○ critic ${index + 1}: ${lens.focus}`);
+        const criticIndices = Array.from({ length: settings.criticCount }, (_, i) => i);
+        const criticStatusLines = criticIndices.map((_, index) => `○ critic ${index + 1}: ${getCriticLens(index).name}`);
         setFusionStatus(ctx, criticStatusLines);
-        const criticStates: FusionLiveWorkerState[] = lenses.map((lens, index) => ({
+
+        const criticStates: FusionLiveWorkerState[] = criticIndices.map((_, index) => ({
           index,
-          label: `critic ${lens.name}`,
-          lens: lens.focus,
+          label: getCriticLens(index).name,
+          lens: "critic",
           status: "queued" as const,
           output: "",
           reasoning: "",
@@ -845,37 +857,37 @@ export default function piFusion(pi: ExtensionAPI): void {
 
         const criticModel = resolveCriticModel(settings, currentModel);
         const criticThinking = resolveCriticThinking(settings, pi.getThinkingLevel());
-        criticResults = await Promise.all(
-          lenses.map(async (lens, index) => {
-            const prompt = buildCriticPrompt({
-              task,
-              recentContext,
-              discoveryContext,
-              promptVariations: settings.rewriteEnabled ? promptVariations : [],
-              workerResults,
-              workerOutputBytes: settings.workerOutputBytes,
-              cwd: ctx.cwd,
-              lens,
-              template: prompts.critic,
-            });
-            activePanel?.update(index, { status: "running" });
-            const result = await runWorker({
-              prompt,
-              cwd: ctx.cwd,
-              index,
-              lens: lens.focus,
-              timeoutMs: settings.timeoutMs,
-              model: criticModel,
-              thinkingLevel: criticThinking,
-              tools: CRITIC_TOOLS,
-              signal: abort.signal,
-              onLiveUpdate: (criticIndex, patch) => activePanel?.update(criticIndex, patch),
-            });
-            criticStatusLines[index] = `${result.ok ? "●" : "⊘"} critic ${index + 1}: ${lens.focus}`;
-            setFusionStatus(ctx, criticStatusLines);
-            return result;
-          }),
-        );
+
+        const criticPromises = criticIndices.map(async (index) => {
+          const lens = getCriticLens(index);
+          const prompt = buildCriticPrompt({
+            task,
+            recentContext,
+            workerResults,
+            workerOutputBytes: settings.workerOutputBytes,
+            cwd: ctx.cwd,
+            lens,
+            template: prompts.critic,
+          });
+          activePanel?.update(index, { status: "running" });
+          const result = await runWorker({
+            prompt,
+            cwd: ctx.cwd,
+            index,
+            lens: lens.name,
+            timeoutMs: settings.timeoutMs,
+            model: criticModel,
+            thinkingLevel: criticThinking,
+            tools: plannerToolsForMode(settings),
+            signal: abort.signal,
+            onLiveUpdate: (criticIndex, patch) => activePanel?.update(criticIndex, patch),
+          });
+          criticStatusLines[index] = `${result.ok ? "●" : "⊘"} critic ${index + 1}: ${lens.name}`;
+          setFusionStatus(ctx, criticStatusLines);
+          return result;
+        });
+
+        criticResults = await Promise.all(criticPromises);
         if (abort.signal.aborted) return undefined;
       }
 
@@ -929,7 +941,6 @@ export default function piFusion(pi: ExtensionAPI): void {
           rewriteResult,
           workerResults,
           criticResults,
-          criticSkipReason,
           runId,
           archiveChunks: archive.chunks.length,
           archiveBytes: archive.manifest.bytes,
