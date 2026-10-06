@@ -36,8 +36,8 @@ Open pi and turn it on from the settings pane:
 
 **pi-fusion adds a planning fanout to pi.** Before the normal pi turn starts, it runs an
 (optional) discovery agent, rewrites variations of the prompt into complementary angles, fans out to
-planner workers, evaluates worker plans with multiple critics, then injects their notes and critiques
-back into the main thread, that acts as a synthesis step.
+planner workers, consolidates their proposals via intermediate integrators, then injects the integrated
+plans back into the main thread, that acts as a synthesis step.
 
 Combining independent model responses has been shown to outscore the individual frontier models on
 many benchmarks. Because independent passes behave differently, the synthesis model can reuse the
@@ -65,24 +65,21 @@ flowchart LR
   R --> W1
   R --> W2
   R --> W3
-  W1 --> C1["Critic #1 (optional)"]
-  W2 --> C1
-  W3 --> C1
-  W1 --> C2["Critic #2 (optional)"]
-  W2 --> C2
-  W3 --> C2
-  W1 --> A["Synthesis (pi actor turn)"]
-  W2 --> A
-  W3 --> A
-  C1 --> A
-  C2 --> A
+  W1 --> I1["Integrator #1 (optional)"]
+  W2 --> I1
+  W3 --> I1
+  W1 --> I2["Integrator #2 (optional)"]
+  W2 --> I2
+  W3 --> I2
+  I1 --> A["Synthesis (pi actor turn)"]
+  I2 --> A
   D --> A
   A --> O([One final turn])
   classDef solid fill:#0E481F,stroke:#0E481F,color:#EEF3EA;
   classDef outline fill:#E7ECE6,stroke:#0E481F,color:#0E481F;
   classDef pill fill:#E3E2DC,stroke:#C7C7C0,color:#16301F;
   class U,O pill;
-  class D,W1,W2,W3,C1,C2,A solid;
+  class D,W1,W2,W3,I1,I2,A solid;
   class R outline;
 ```
 
@@ -175,7 +172,7 @@ Open the settings pane:
 | Agent tools    | Switches discovery/workers between all tools and read-only.    |
 | Discovery      | Picks the context-loading model and reasoning effort.          |
 | Rewrite        | Toggles prompt rewriting before worker fanout.                 |
-| Critics        | Toggles critic layer, picks model and reasoning effort.        |
+| Integrators    | Toggles intermediate integrators, model, and reasoning effort. |
 | Synthesis      | Picks the synthesis model and reasoning effort.                |
 | Save and close | Persists settings in the pi session.                           |
 
@@ -286,15 +283,15 @@ This prompt runs on each parallel worker.
   - `{{toolGuidance}}`: Pre-formatted guidance for the selected planner tool mode.
   - `{{recentContext}}`: Pre-formatted recent conversation history.
 
-#### 4. Critic Prompt (`prompts.critic`)
+#### 4. Integrator Prompt (`prompts.integrator`)
 
-This prompt runs on each critic agent evaluating worker outputs.
+This prompt runs on each intermediate integrator consolidating worker proposals.
 
 - **Placeholders:**
   - `{{cwd}}`: Working directory of your project.
   - `{{task}}`: Your original prompt.
-  - `{{criticName}}`: Critic index/name (e.g. `Critic #1`, `Critic #2`).
-  - `{{workerOutputs}}`: Formatted worker outputs/plans to be evaluated.
+  - `{{integratorName}}`: Integrator index/name (e.g. `Integrator #1`, `Integrator #2`).
+  - `{{workerOutputs}}`: Formatted worker outputs/plans to be evaluated and consolidated.
   - `{{recentContext}}`: Pre-formatted recent conversation history.
 
 #### 5. Synthesis Prompt (`prompts.synthesis`)
@@ -305,9 +302,7 @@ This prompt formats the final planning bundle injected into the synthesis turn.
   - `{{task}}`: Your original prompt.
   - `{{discoveryContext}}`: Context loaded by the discovery agent.
   - `{{variations}}`: List of worker prompt variations.
-  - `{{workerOutputs}}`: Outputs and plans produced by each worker.
-  - `{{criticOutputsSection}}`: Pre-formatted critic evaluations section.
-  - `{{criticOutputs}}`: Critic evaluations produced by critic agents.
+  - `{{plannerOutputs}}`: Integrated plans produced by intermediate integrators (or workers if integrators are disabled).
   - `{{imageNote}}`: A note telling the synthesis step that workers did not see attached images (if any).
 
 > 💡 **Important:** The synthesis prompt template should contain `<!-- pi-fusion:synthesis-prompt -->` so that subsequent conversation turns know a fused turn has finished and bypass fusion automatically. If a custom synthesis prompt omits it, pi-fusion prepends the marker defensively.
@@ -334,13 +329,13 @@ This prompt formats the final planning bundle injected into the synthesis turn.
 /fusion worker-model current
 /fusion worker-thinking medium
 /fusion worker-thinking current
-/fusion critic on
-/fusion critic off
-/fusion critics 2
-/fusion critic-model anthropic/claude-sonnet-4-5
-/fusion critic-model current
-/fusion critic-thinking high
-/fusion critic-thinking current
+/fusion integrator on
+/fusion integrator off
+/fusion integrators 2
+/fusion integrator-model anthropic/claude-sonnet-4-5
+/fusion integrator-model current
+/fusion integrator-thinking high
+/fusion integrator-thinking current
 /fusion synthesis-model openai/gpt-5.5
 /fusion synthesis-model current
 /fusion synthesis-thinking high
@@ -365,15 +360,15 @@ pi --fusion-enabled
 pi --fusion-disabled
 pi --fusion-preset cheap-planners
 pi --fusion-workers 3
-pi --fusion-critics 2
-pi --fusion-no-critic
+pi --fusion-integrators 2
+pi --fusion-no-integrator
 pi --fusion-planner-tools all
 pi --fusion-discovery-model anthropic/claude-haiku-4-5
 pi --fusion-discovery-thinking low
 pi --fusion-worker-model google/gemini-3.5-flash
 pi --fusion-worker-thinking medium
-pi --fusion-critic-model anthropic/claude-sonnet-4-5
-pi --fusion-critic-thinking high
+pi --fusion-integrator-model anthropic/claude-sonnet-4-5
+pi --fusion-integrator-thinking high
 pi --fusion-synthesis-model openai/gpt-5.5
 pi --fusion-synthesis-thinking high
 pi --fusion-output-bytes 12000

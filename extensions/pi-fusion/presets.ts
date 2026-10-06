@@ -32,6 +32,7 @@ interface FusionPresetFile {
     discovery?: string;
     rewrite?: string;
     worker?: string;
+    integrator?: string;
     critic?: string;
     synthesis?: string;
     // TODO(2026-07-17): remove legacy "actor" prompt key once configs have migrated to "synthesis".
@@ -70,9 +71,9 @@ export function snapshotFusionSettings(settings: FusionSettings): PersistedFusio
   return {
     discoveryEnabled: settings.discoveryEnabled,
     rewriteEnabled: settings.rewriteEnabled,
-    criticEnabled: settings.criticEnabled,
+    integratorEnabled: settings.integratorEnabled,
     workerCount: settings.workerCount,
-    criticCount: settings.criticCount,
+    integratorCount: settings.integratorCount,
     workers: settings.workers.map((worker) => ({ ...worker })),
     workerOutputBytes: settings.workerOutputBytes,
     contextBytes: settings.contextBytes,
@@ -80,11 +81,11 @@ export function snapshotFusionSettings(settings: FusionSettings): PersistedFusio
     timeoutMs: settings.timeoutMs,
     discoveryModel: settings.discoveryModel,
     workerModel: settings.workerModel,
-    criticModel: settings.criticModel,
+    integratorModel: settings.integratorModel,
     synthesisModel: settings.synthesisModel,
     discoveryThinking: settings.discoveryThinking,
     workerThinking: settings.workerThinking,
-    criticThinking: settings.criticThinking,
+    integratorThinking: settings.integratorThinking,
     synthesisThinking: settings.synthesisThinking,
     plannerToolMode: settings.plannerToolMode,
   };
@@ -194,7 +195,7 @@ export async function loadFusionPrompts(cwd: string): Promise<FusionPrompts> {
     prompts.discovery = file.prompts?.discovery ?? prompts.discovery;
     prompts.rewrite = file.prompts?.rewrite ?? prompts.rewrite;
     prompts.worker = file.prompts?.worker ?? prompts.worker;
-    prompts.critic = file.prompts?.critic ?? prompts.critic;
+    prompts.integrator = file.prompts?.integrator ?? file.prompts?.critic ?? prompts.integrator;
     // TODO(2026-07-17): drop the file.prompts?.actor fallback once configs have migrated to "synthesis".
     prompts.synthesis = file.prompts?.synthesis ?? file.prompts?.actor ?? prompts.synthesis;
   }

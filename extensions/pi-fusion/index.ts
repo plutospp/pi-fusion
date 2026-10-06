@@ -5,7 +5,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import {
-  buildCriticPrompt,
+  buildIntegratorPrompt,
   buildFusionArchiveEntries,
   buildSynthesisPrompt,
   buildDiscoveryPrompt,
@@ -23,7 +23,7 @@ import {
   FUSION_ARCHIVE_ENTRY_TYPE,
   FUSION_SUBAGENT_ENV,
   FUSION_TRACE_MESSAGE_TYPE,
-  getCriticLens,
+  getIntegratorLens,
   listFusionArchiveRuns,
   reconstructFusionArchive,
   fusionStatusGlyph,
@@ -32,8 +32,8 @@ import {
   normalizeWorkerSlots,
   parsePromptVariations,
   resolveSettings,
-  resolveCriticModel,
-  resolveCriticThinking,
+  resolveIntegratorModel,
+  resolveIntegratorThinking,
   resolveWorkerModel,
   resolveWorkerThinking,
   shouldBypassFusion,
@@ -298,9 +298,9 @@ function settingsFromFlags(pi: ExtensionAPI, persisted?: PersistedFusionSettings
     "fusion-disabled": pi.getFlag("fusion-disabled"),
     "fusion-no-discovery": pi.getFlag("fusion-no-discovery"),
     "fusion-no-rewrite": pi.getFlag("fusion-no-rewrite"),
-    "fusion-no-critic": pi.getFlag("fusion-no-critic"),
+    "fusion-no-integrator": pi.getFlag("fusion-no-integrator") ?? pi.getFlag("fusion-no-critic"),
     "fusion-workers": pi.getFlag("fusion-workers"),
-    "fusion-critics": pi.getFlag("fusion-critics"),
+    "fusion-integrators": pi.getFlag("fusion-integrators") ?? pi.getFlag("fusion-critics"),
     "fusion-output-bytes": pi.getFlag("fusion-output-bytes"),
     "fusion-context-bytes": pi.getFlag("fusion-context-bytes"),
     "fusion-resume-bytes": pi.getFlag("fusion-resume-bytes"),
@@ -308,11 +308,11 @@ function settingsFromFlags(pi: ExtensionAPI, persisted?: PersistedFusionSettings
     "fusion-model": pi.getFlag("fusion-model"),
     "fusion-discovery-model": pi.getFlag("fusion-discovery-model"),
     "fusion-worker-model": pi.getFlag("fusion-worker-model"),
-    "fusion-critic-model": pi.getFlag("fusion-critic-model"),
+    "fusion-integrator-model": pi.getFlag("fusion-integrator-model") ?? pi.getFlag("fusion-critic-model"),
     "fusion-synthesis-model": pi.getFlag("fusion-synthesis-model"),
     "fusion-discovery-thinking": pi.getFlag("fusion-discovery-thinking"),
     "fusion-worker-thinking": pi.getFlag("fusion-worker-thinking"),
-    "fusion-critic-thinking": pi.getFlag("fusion-critic-thinking"),
+    "fusion-integrator-thinking": pi.getFlag("fusion-integrator-thinking") ?? pi.getFlag("fusion-critic-thinking"),
     "fusion-synthesis-thinking": pi.getFlag("fusion-synthesis-thinking"),
     "fusion-planner-tools": pi.getFlag("fusion-planner-tools"),
     "fusion-preset": pi.getFlag("fusion-preset"),
@@ -325,9 +325,9 @@ function settingsSummary(settings: FusionSettings): string {
     `armed=${settings.enabled}`,
     `discovery=${settings.discoveryEnabled}`,
     `rewrite=${settings.rewriteEnabled}`,
-    `critic=${settings.criticEnabled}`,
+    `integrator=${settings.integratorEnabled}`,
     `workers=${settings.workerCount}`,
-    `critics=${settings.criticCount}`,
+    `integrators=${settings.integratorCount}`,
     `workerOutputBytes=${settings.workerOutputBytes}`,
     `contextBytes=${settings.contextBytes}`,
     `resumeContextBytes=${settings.resumeContextBytes}`,
@@ -336,8 +336,8 @@ function settingsSummary(settings: FusionSettings): string {
     `discoveryThinking=${settings.discoveryThinking ?? "current"}`,
     `workerModel=${settings.workerModel ?? "current"}`,
     `workerThinking=${settings.workerThinking ?? "current"}`,
-    `criticModel=${settings.criticModel ?? "current"}`,
-    `criticThinking=${settings.criticThinking ?? "current"}`,
+    `integratorModel=${settings.integratorModel ?? "current"}`,
+    `integratorThinking=${settings.integratorThinking ?? "current"}`,
     `synthesisModel=${settings.synthesisModel ?? "current"}`,
     `synthesisThinking=${settings.synthesisThinking ?? "current"}`,
     `plannerTools=${settings.plannerToolMode}`,
@@ -401,8 +401,8 @@ export default function piFusion(pi: ExtensionAPI): void {
     type: "boolean",
     default: false,
   });
-  pi.registerFlag("fusion-no-critic", {
-    description: "Skip the critic stage (on by default)",
+  pi.registerFlag("fusion-no-integrator", {
+    description: "Skip the intermediate integrator stage (on by default)",
     type: "boolean",
     default: false,
   });
@@ -411,10 +411,10 @@ export default function piFusion(pi: ExtensionAPI): void {
     type: "string",
     default: String(DEFAULT_SETTINGS.workerCount),
   });
-  pi.registerFlag("fusion-critics", {
-    description: "Number of parallel pi-fusion critics (1-8, default 2)",
+  pi.registerFlag("fusion-integrators", {
+    description: "Number of parallel intermediate integrators (1-8, default 2)",
     type: "string",
-    default: String(DEFAULT_SETTINGS.criticCount),
+    default: String(DEFAULT_SETTINGS.integratorCount),
   });
   pi.registerFlag("fusion-output-bytes", {
     description: "Max bytes from each worker inserted into the synthesis prompt",
@@ -451,8 +451,8 @@ export default function piFusion(pi: ExtensionAPI): void {
     type: "string",
     default: "current",
   });
-  pi.registerFlag("fusion-critic-model", {
-    description: "Model for fusion critics, or current/default",
+  pi.registerFlag("fusion-integrator-model", {
+    description: "Model for intermediate integrators, or current/default",
     type: "string",
     default: "current",
   });
@@ -461,8 +461,8 @@ export default function piFusion(pi: ExtensionAPI): void {
     type: "string",
     default: "current",
   });
-  pi.registerFlag("fusion-critic-thinking", {
-    description: "Reasoning effort for fusion critics: current/off/minimal/low/medium/high/xhigh",
+  pi.registerFlag("fusion-integrator-thinking", {
+    description: "Reasoning effort for intermediate integrators: current/off/minimal/low/medium/high/xhigh",
     type: "string",
     default: "current",
   });
@@ -586,14 +586,14 @@ export default function piFusion(pi: ExtensionAPI): void {
       else if (command === "off") settings.enabled = false;
       else if (command === "discovery") settings.discoveryEnabled = value.toLowerCase() !== "off";
       else if (command === "rewrite") settings.rewriteEnabled = value.toLowerCase() !== "off";
-      else if (command === "critic") settings.criticEnabled = value.toLowerCase() !== "off";
+      else if (command === "integrator" || command === "critic") settings.integratorEnabled = value.toLowerCase() !== "off";
       else if (command === "tools" || command === "planner-tools")
         settings.plannerToolMode = normalizePlannerToolMode(value, settings.plannerToolMode);
       else if (command === "workers") {
         settings.workerCount = resolveSettings({ "fusion-workers": value }, settings).workerCount;
         settings.workers = normalizeWorkerSlots(settings.workers, settings.workerCount);
-      } else if (command === "critics") {
-        settings.criticCount = resolveSettings({ "fusion-critics": value }, settings).criticCount;
+      } else if (command === "integrators" || command === "critics") {
+        settings.integratorCount = resolveSettings({ "fusion-integrators": value }, settings).integratorCount;
       } else if (command === "output") settings.workerOutputBytes = resolveSettings({ "fusion-output-bytes": value }, settings).workerOutputBytes;
       else if (command === "context") settings.contextBytes = resolveSettings({ "fusion-context-bytes": value }, settings).contextBytes;
       else if (command === "resume" || command === "resume-bytes")
@@ -606,9 +606,15 @@ export default function piFusion(pi: ExtensionAPI): void {
         settings.workerModel = resolveSettings({ "fusion-worker-model": value }, settings).workerModel;
       else if (command === "worker-thinking" || command === "worker-reasoning") {
         settings.workerThinking = resolveSettings({ "fusion-worker-thinking": value }, settings).workerThinking;
-      } else if (command === "critic-model") settings.criticModel = resolveSettings({ "fusion-critic-model": value }, settings).criticModel;
-      else if (command === "critic-thinking" || command === "critic-reasoning") {
-        settings.criticThinking = resolveSettings({ "fusion-critic-thinking": value }, settings).criticThinking;
+      } else if (command === "integrator-model" || command === "critic-model")
+        settings.integratorModel = resolveSettings({ "fusion-integrator-model": value }, settings).integratorModel;
+      else if (
+        command === "integrator-thinking" ||
+        command === "integrator-reasoning" ||
+        command === "critic-thinking" ||
+        command === "critic-reasoning"
+      ) {
+        settings.integratorThinking = resolveSettings({ "fusion-integrator-thinking": value }, settings).integratorThinking;
       } else if (command === "synthesis-model") {
         settings.synthesisModel = resolveSettings({ "fusion-synthesis-model": value }, settings).synthesisModel;
       } else if (command === "synthesis-thinking" || command === "synthesis-reasoning") {
@@ -618,7 +624,7 @@ export default function piFusion(pi: ExtensionAPI): void {
         if (!ok) return;
       } else {
         ctx.ui.notify(
-          "Usage: /fusion [ui|status|on|off|preset [list|save NAME|save-project NAME|NAME]|discovery on|off|rewrite on|off|critic on|off|tools all|read-only|workers N|critics N|discovery-model SPEC|discovery-thinking LEVEL|worker-model SPEC|worker-thinking LEVEL|critic-model SPEC|critic-thinking LEVEL|synthesis-model SPEC|synthesis-thinking LEVEL|output BYTES|context BYTES|resume BYTES|timeout MS]",
+          "Usage: /fusion [ui|status|on|off|preset [list|save NAME|save-project NAME|NAME]|discovery on|off|rewrite on|off|integrator on|off|tools all|read-only|workers N|integrators N|discovery-model SPEC|discovery-thinking LEVEL|worker-model SPEC|worker-thinking LEVEL|integrator-model SPEC|integrator-thinking LEVEL|synthesis-model SPEC|synthesis-thinking LEVEL|output BYTES|context BYTES|resume BYTES|timeout MS]",
           "info",
         );
         return;
@@ -835,39 +841,39 @@ export default function piFusion(pi: ExtensionAPI): void {
       const workerResults = await Promise.all(workerPromises);
       if (abort.signal.aborted) return undefined;
 
-      let criticResults: WorkerResult[] | undefined;
-      if (settings.criticEnabled && settings.criticCount > 0) {
+      let integratorResults: WorkerResult[] | undefined;
+      if (settings.integratorEnabled && settings.integratorCount > 0) {
         activePanel?.close();
         activePanel = undefined;
 
-        const criticIndices = Array.from({ length: settings.criticCount }, (_, i) => i);
-        const criticStatusLines = criticIndices.map((_, index) => `○ critic ${index + 1}: ${getCriticLens(index).name}`);
-        setFusionStatus(ctx, criticStatusLines);
+        const integratorIndices = Array.from({ length: settings.integratorCount }, (_, i) => i);
+        const integratorStatusLines = integratorIndices.map((_, index) => `○ integrator ${index + 1}: ${getIntegratorLens(index).name}`);
+        setFusionStatus(ctx, integratorStatusLines);
 
-        const criticStates: FusionLiveWorkerState[] = criticIndices.map((_, index) => ({
+        const integratorStates: FusionLiveWorkerState[] = integratorIndices.map((_, index) => ({
           index,
-          label: getCriticLens(index).name,
-          lens: "critic",
+          label: getIntegratorLens(index).name,
+          lens: "integrator",
           status: "queued" as const,
           output: "",
           reasoning: "",
           events: [],
         }));
-        activePanel = startFusionLivePanel(ctx, criticStates, "LLM Fusion critics", cancelFusion);
+        activePanel = startFusionLivePanel(ctx, integratorStates, "LLM Fusion integrators", cancelFusion);
 
-        const criticModel = resolveCriticModel(settings, currentModel);
-        const criticThinking = resolveCriticThinking(settings, pi.getThinkingLevel());
+        const integratorModel = resolveIntegratorModel(settings, currentModel);
+        const integratorThinking = resolveIntegratorThinking(settings, pi.getThinkingLevel());
 
-        const criticPromises = criticIndices.map(async (index) => {
-          const lens = getCriticLens(index);
-          const prompt = buildCriticPrompt({
+        const integratorPromises = integratorIndices.map(async (index) => {
+          const lens = getIntegratorLens(index);
+          const prompt = buildIntegratorPrompt({
             task,
             recentContext,
             workerResults,
             workerOutputBytes: settings.workerOutputBytes,
             cwd: ctx.cwd,
             lens,
-            template: prompts.critic,
+            template: prompts.integrator,
           });
           activePanel?.update(index, { status: "running" });
           const result = await runWorker({
@@ -876,18 +882,18 @@ export default function piFusion(pi: ExtensionAPI): void {
             index,
             lens: lens.name,
             timeoutMs: settings.timeoutMs,
-            model: criticModel,
-            thinkingLevel: criticThinking,
+            model: integratorModel,
+            thinkingLevel: integratorThinking,
             tools: plannerToolsForMode(settings),
             signal: abort.signal,
-            onLiveUpdate: (criticIndex, patch) => activePanel?.update(criticIndex, patch),
+            onLiveUpdate: (integratorIndex, patch) => activePanel?.update(integratorIndex, patch),
           });
-          criticStatusLines[index] = `${result.ok ? "●" : "⊘"} critic ${index + 1}: ${lens.name}`;
-          setFusionStatus(ctx, criticStatusLines);
+          integratorStatusLines[index] = `${result.ok ? "●" : "⊘"} integrator ${index + 1}: ${lens.name}`;
+          setFusionStatus(ctx, integratorStatusLines);
           return result;
         });
 
-        criticResults = await Promise.all(criticPromises);
+        integratorResults = await Promise.all(integratorPromises);
         if (abort.signal.aborted) return undefined;
       }
 
@@ -900,12 +906,12 @@ export default function piFusion(pi: ExtensionAPI): void {
         task,
         discoveryEnabled: settings.discoveryEnabled,
         rewriteEnabled: settings.rewriteEnabled,
-        criticEnabled: settings.criticEnabled,
+        integratorEnabled: settings.integratorEnabled,
         promptVariations: settings.rewriteEnabled ? promptVariations : [],
         discoveryResult,
         rewriteResult,
         workerResults,
-        criticResults,
+        integratorResults,
       });
       pi.appendEntry(FUSION_ARCHIVE_ENTRY_TYPE, archive.manifest);
       for (const chunk of archive.chunks) pi.appendEntry(FUSION_ARCHIVE_ENTRY_TYPE, chunk);
@@ -926,7 +932,7 @@ export default function piFusion(pi: ExtensionAPI): void {
           discoveryContext,
           promptVariations: settings.rewriteEnabled ? promptVariations : [],
           workerResults,
-          criticResults,
+          integratorResults,
           workerOutputBytes: settings.workerOutputBytes,
           imageCount,
           template: prompts.synthesis,
@@ -935,12 +941,12 @@ export default function piFusion(pi: ExtensionAPI): void {
           task,
           discoveryEnabled: settings.discoveryEnabled,
           rewriteEnabled: settings.rewriteEnabled,
-          criticEnabled: settings.criticEnabled,
+          integratorEnabled: settings.integratorEnabled,
           promptVariations: settings.rewriteEnabled ? promptVariations : [],
           discoveryResult,
           rewriteResult,
           workerResults,
-          criticResults,
+          integratorResults,
           runId,
           archiveChunks: archive.chunks.length,
           archiveBytes: archive.manifest.bytes,

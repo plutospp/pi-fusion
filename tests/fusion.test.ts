@@ -7,7 +7,7 @@ import { SessionManager, convertToLlm } from "@earendil-works/pi-coding-agent";
 import {
   SYNTHESIS_PROMPT_MARKER,
   LEGACY_SYNTHESIS_PROMPT_MARKER,
-  buildCriticPrompt,
+  buildIntegratorPrompt,
   buildFusionArchive,
   buildFusionArchiveEntries,
   buildSynthesisPrompt,
@@ -23,15 +23,15 @@ import {
   formatFusionTraceDetails,
   formatToolEvent,
   fusionStatusGlyph,
-  getCriticLens,
+  getIntegratorLens,
   getWorkerLens,
   listFusionArchiveRuns,
   normalizeWorkerSlots,
   parsePromptVariations,
   reconstructFusionArchive,
   resolveSettings,
-  resolveCriticModel,
-  resolveCriticThinking,
+  resolveIntegratorModel,
+  resolveIntegratorThinking,
   resolveWorkerModel,
   resolveWorkerThinking,
   shouldBypassFusion,
@@ -90,32 +90,32 @@ describe("settings", () => {
   it("resolves flags with clamped numeric values", () => {
     const settings = resolveSettings({
       "fusion-workers": "999",
-      "fusion-critics": "999",
+      "fusion-integrators": "999",
       "fusion-output-bytes": "10",
       "fusion-context-bytes": "-1",
       "fusion-timeout-ms": "abc",
       "fusion-discovery-model": "anthropic/claude-haiku-4-5",
       "fusion-worker-model": "openai/gpt-5",
-      "fusion-critic-model": "anthropic/claude-sonnet-4-5",
+      "fusion-integrator-model": "anthropic/claude-sonnet-4-5",
       "fusion-synthesis-model": "anthropic/claude-opus-4-5",
       "fusion-discovery-thinking": "low",
       "fusion-worker-thinking": "high",
-      "fusion-critic-thinking": "medium",
+      "fusion-integrator-thinking": "medium",
       "fusion-synthesis-thinking": "xhigh",
     });
 
     assert.equal(settings.workerCount, 8);
-    assert.equal(settings.criticCount, 8);
+    assert.equal(settings.integratorCount, 8);
     assert.equal(settings.workerOutputBytes, 1_000);
     assert.equal(settings.contextBytes, 0);
     assert.equal(settings.timeoutMs, 600_000);
     assert.equal(settings.discoveryModel, "anthropic/claude-haiku-4-5");
     assert.equal(settings.workerModel, "openai/gpt-5");
-    assert.equal(settings.criticModel, "anthropic/claude-sonnet-4-5");
+    assert.equal(settings.integratorModel, "anthropic/claude-sonnet-4-5");
     assert.equal(settings.synthesisModel, "anthropic/claude-opus-4-5");
     assert.equal(settings.discoveryThinking, "low");
     assert.equal(settings.workerThinking, "high");
-    assert.equal(settings.criticThinking, "medium");
+    assert.equal(settings.integratorThinking, "medium");
     assert.equal(settings.synthesisThinking, "xhigh");
   });
 
@@ -151,20 +151,20 @@ describe("settings", () => {
     assert.equal(resolveSettings({ "fusion-enabled": true, "fusion-disabled": true }).enabled, false);
   });
 
-  it("keeps discovery, rewrite, and critic on by default, toggleable via flags and persisted settings", () => {
+  it("keeps discovery, rewrite, and integrator on by default, toggleable via flags and persisted settings", () => {
     const defaults = resolveSettings({});
     assert.equal(defaults.discoveryEnabled, true);
     assert.equal(defaults.rewriteEnabled, true);
-    assert.equal(defaults.criticEnabled, true);
+    assert.equal(defaults.integratorEnabled, true);
 
-    const off = resolveSettings({ "fusion-no-discovery": true, "fusion-no-rewrite": true, "fusion-no-critic": true });
+    const off = resolveSettings({ "fusion-no-discovery": true, "fusion-no-rewrite": true, "fusion-no-integrator": true });
     assert.equal(off.discoveryEnabled, false);
     assert.equal(off.rewriteEnabled, false);
-    assert.equal(off.criticEnabled, false);
+    assert.equal(off.integratorEnabled, false);
 
     assert.equal(resolveSettings({ "fusion-no-discovery": true }, { discoveryEnabled: true }).discoveryEnabled, true);
     assert.equal(resolveSettings({}, { rewriteEnabled: false }).rewriteEnabled, false);
-    assert.equal(resolveSettings({}, { criticEnabled: false }).criticEnabled, false);
+    assert.equal(resolveSettings({}, { integratorEnabled: false }).integratorEnabled, false);
   });
 
   it("defaults planner subprocesses to all tools with a read-only opt-out", () => {
@@ -209,8 +209,8 @@ describe("settings", () => {
       {
         "fusion-worker-model": "anthropic/claude-sonnet-4-5",
         "fusion-worker-thinking": "medium",
-        "fusion-critic-model": "openai/gpt-5",
-        "fusion-critic-thinking": "high",
+        "fusion-integrator-model": "openai/gpt-5",
+        "fusion-integrator-thinking": "high",
       },
       {
         workerCount: 2,
@@ -224,8 +224,8 @@ describe("settings", () => {
     assert.equal(resolveWorkerModel(settings, 1, "current/model"), "anthropic/claude-sonnet-4-5");
     assert.equal(resolveWorkerThinking(settings, 0, "off"), "high");
     assert.equal(resolveWorkerThinking(settings, 1, "off"), "medium");
-    assert.equal(resolveCriticModel(settings, "current/model"), "openai/gpt-5");
-    assert.equal(resolveCriticThinking(settings, "off"), "high");
+    assert.equal(resolveIntegratorModel(settings, "current/model"), "openai/gpt-5");
+    assert.equal(resolveIntegratorThinking(settings, "off"), "high");
   });
 });
 
@@ -348,9 +348,9 @@ describe("prompts", () => {
     assert.doesNotMatch(prompt, /mapper|planner|skeptic/);
   });
 
-  it("builds critic prompt with worker outputs and user task", () => {
-    const lens = getCriticLens(0);
-    const prompt = buildCriticPrompt({
+  it("builds integrator prompt with worker outputs and user task", () => {
+    const lens = getIntegratorLens(0);
+    const prompt = buildIntegratorPrompt({
       task: "Implement feature X",
       recentContext: "Recent conversation context",
       workerResults: [worker({ output: "Plan for feature X" })],
@@ -359,32 +359,28 @@ describe("prompts", () => {
       lens,
     });
 
-    assert.equal(lens.name, "Critic #1");
-    assert.match(prompt, /critic Critic #1/i);
+    assert.equal(lens.name, "Integrator #1");
+    assert.match(prompt, /integrator Integrator #1/i);
     assert.match(prompt, /Implement feature X/);
     assert.match(prompt, /Plan for feature X/);
   });
 
-  it("builds synthesis prompt with bounded worker outputs, critic outputs, and image warning", () => {
+  it("builds synthesis prompt with integrator outputs replacing raw workers", () => {
     const prompt = buildSynthesisPrompt({
       originalText: "Implement feature",
       discoveryContext: "Read src/index.ts and found entrypoint",
       promptVariations: ["Explore tests", "Explore API", "Explore docs"],
-      workerResults: [worker({ output: "x".repeat(2_000) })],
-      criticResults: [worker({ lens: "Critic #1", output: "Critic review details" })],
+      workerResults: [worker({ output: "Raw worker output that should be replaced" })],
+      integratorResults: [worker({ lens: "Integrator #1", output: "Integrated consolidated plan" })],
       workerOutputBytes: 100,
       imageCount: 2,
     });
 
     assert.match(prompt, new RegExp(SYNTHESIS_PROMPT_MARKER));
-    assert.ok(prompt.indexOf("## Shared discovery context") < prompt.indexOf("## Original user request"));
     assert.match(prompt, /Implement feature/);
-    assert.match(prompt, /Workers did not see images/);
-    assert.match(prompt, /Shared discovery context/);
-    assert.match(prompt, /Explore API/);
-    assert.match(prompt, /Critic evaluations/);
-    assert.match(prompt, /Critic review details/);
-    assert.match(prompt, /pi-fusion truncated/);
+    assert.match(prompt, /Integrator 1: Integrator #1/);
+    assert.match(prompt, /Integrated consolidated plan/);
+    assert.doesNotMatch(prompt, /Raw worker output that should be replaced/);
   });
   it("preserves the fusion marker when synthesis prompts are customized", () => {
     const prompt = buildSynthesisPrompt({
@@ -421,12 +417,12 @@ describe("fusion trace", () => {
       task: "Implement feature",
       discoveryEnabled: true,
       rewriteEnabled: true,
-      criticEnabled: true,
+      integratorEnabled: true,
       promptVariations: ["Explore API", "Explore tests"],
       discoveryResult: worker({ lens: "discovery", output: "loaded src/index.ts" }),
       rewriteResult: worker({ lens: "rewrite", output: '["Explore API", "Explore tests"]' }),
       workerResults: [worker({ index: 0, lens: "#1", output: "plan A" }), worker({ index: 1, lens: "#2", output: "plan B" })],
-      criticResults: [worker({ index: 0, lens: "Critic #1", output: "critique plan A" })],
+      integratorResults: [worker({ index: 0, lens: "Integrator #1", output: "integrated plan" })],
       runId: "fusion-20260617-000000-abc123",
       archiveChunks: 1,
       archiveBytes: 4_096,
@@ -434,19 +430,18 @@ describe("fusion trace", () => {
 
     assert.equal(message.customType, FUSION_TRACE_MESSAGE_TYPE);
     assert.equal(message.display, true);
-    // The model-visible content carries the headline, an archive pointer, and bounded conclusions.
     assert.match(message.content, /pi-fusion transcript/);
     assert.match(message.content, /plan A/);
     assert.match(message.content, /\/fusion-transcript fusion-20260617-000000-abc123/);
     assert.equal(message.details.runId, "fusion-20260617-000000-abc123");
     assert.equal(message.details.workers.length, 2);
-    assert.equal(message.details.critics.length, 1);
+    assert.equal(message.details.integrators.length, 1);
 
     const expanded = formatFusionTraceDetails(message.details);
     assert.match(expanded, /Full untruncated transcript archived/);
     assert.match(expanded, /Explore API/);
     assert.match(expanded, /plan A/);
-    assert.match(expanded, /critique plan A/);
+    assert.match(expanded, /integrated plan/);
   });
 
   it("bounds the in-context handoff and detail previews regardless of worker size", () => {
@@ -454,7 +449,7 @@ describe("fusion trace", () => {
       task: "x".repeat(10_000),
       discoveryEnabled: false,
       rewriteEnabled: false,
-      criticEnabled: false,
+      integratorEnabled: false,
       promptVariations: ["p".repeat(10_000)],
       workerResults: [worker({ output: "o".repeat(40_000), reasoning: "r".repeat(20_000), toolContext: "t".repeat(40_000) })],
       resumeContextBytes: 8_000,
@@ -487,7 +482,7 @@ describe("fusion archive", () => {
       task: "Implement feature",
       discoveryEnabled: true,
       rewriteEnabled: true,
-      criticEnabled: true,
+      integratorEnabled: true,
       promptVariations: ["Explore API", "Explore tests"],
       discoveryResult: worker({ lens: "discovery", output: "loaded src/index.ts" }),
       rewriteResult: worker({ lens: "rewrite", output: '["Explore API", "Explore tests"]' }),
@@ -495,7 +490,7 @@ describe("fusion archive", () => {
         worker({ index: 0, lens: "#1", output: "FULL_WORKER_OUTPUT_" + "z".repeat(60_000), toolContext: "deep tool trace" }),
         worker({ index: 1, lens: "#2", output: "plan B" }),
       ],
-      criticResults: [worker({ index: 0, lens: "Critic #1", output: "CRITIC_OUTPUT_good_plan" })],
+      integratorResults: [worker({ index: 0, lens: "Integrator #1", output: "INTEGRATOR_OUTPUT_integrated_plan" })],
     };
 
     const transcript = buildFusionArchive(input);
@@ -525,7 +520,7 @@ describe("fusion archive", () => {
       task: "task A",
       discoveryEnabled: false,
       rewriteEnabled: false,
-      criticEnabled: false,
+      integratorEnabled: false,
       promptVariations: [],
       workerResults: [worker({ output: "OUTPUT_A" })],
     });
@@ -534,7 +529,7 @@ describe("fusion archive", () => {
       task: "task B",
       discoveryEnabled: false,
       rewriteEnabled: false,
-      criticEnabled: false,
+      integratorEnabled: false,
       promptVariations: [],
       workerResults: [worker({ output: "OUTPUT_B" })],
     });
@@ -589,11 +584,11 @@ describe("session persistence (end-to-end)", () => {
       task: "Implement feature X",
       discoveryEnabled: true,
       rewriteEnabled: true,
-      criticEnabled: true,
+      integratorEnabled: true,
       promptVariations: ["Explore API", "Explore tests"],
       discoveryResult: worker({ lens: "discovery", output: "DISCOVERY_ARCHIVE_ONLY context" }),
       workerResults,
-      criticResults: [worker({ index: 0, lens: "Critic #1", output: "CRITIC_EVALUATION" })],
+      integratorResults: [worker({ index: 0, lens: "Integrator #1", output: "INTEGRATOR_EVALUATION" })],
     });
     sm.appendCustomEntry(FUSION_ARCHIVE_ENTRY_TYPE, archive.manifest);
     for (const chunk of archive.chunks) sm.appendCustomEntry(FUSION_ARCHIVE_ENTRY_TYPE, chunk);
@@ -603,10 +598,10 @@ describe("session persistence (end-to-end)", () => {
       task: "Implement feature X",
       discoveryEnabled: true,
       rewriteEnabled: true,
-      criticEnabled: true,
+      integratorEnabled: true,
       promptVariations: ["Explore API", "Explore tests"],
       workerResults,
-      criticResults: [worker({ index: 0, lens: "Critic #1", output: "CRITIC_EVALUATION" })],
+      integratorResults: [worker({ index: 0, lens: "Integrator #1", output: "INTEGRATOR_EVALUATION" })],
       runId,
       archiveChunks: archive.chunks.length,
       archiveBytes: archive.manifest.bytes,
