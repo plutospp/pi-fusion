@@ -71,6 +71,8 @@ flowchart LR
   W1 --> I2["Integrator #2 (optional)"]
   W2 --> I2
   W3 --> I2
+  D --> I1
+  D --> I2
   I1 --> A["Synthesis (pi actor turn)"]
   I2 --> A
   D --> A
