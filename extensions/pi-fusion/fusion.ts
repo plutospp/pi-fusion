@@ -926,7 +926,7 @@ Return concise markdown with these sections:
 
 Keep the result useful for the downstream synthesis step. Do not implement anything.`,
 
-  integrator: `You are integrator {{integratorName}} in an LLM Fusion pipeline pass.
+  integrator: `{{discoveryContext}}You are integrator {{integratorName}} in an LLM Fusion pipeline pass.
 
 Your job is to independently evaluate, filter, and consolidate the plans/outputs produced by parallel workers for the user's request into a coherent, high-quality integrated synthesis plan. Resolve contradictions, eliminate flaws or unviable approaches, and unify the best ideas from across worker proposals.
 
@@ -1087,6 +1087,7 @@ export function buildWorkerPrompt(input: {
 export function buildIntegratorPrompt(input: {
   task: string;
   recentContext: string;
+  discoveryContext?: string;
   workerResults: WorkerResult[];
   workerOutputBytes: number;
   cwd: string;
@@ -1094,10 +1095,12 @@ export function buildIntegratorPrompt(input: {
   template?: string;
 }): string {
   const templateStr = input.template ?? DEFAULT_PROMPTS.integrator;
+  const discoverySection = input.discoveryContext?.trim() ? `## Shared discovery context\n\n${input.discoveryContext.trim()}\n\n` : "";
   const recentSection = input.recentContext.trim() ? `## Recent conversation context (truncated)\n\n${input.recentContext.trim()}\n\n` : "";
   const workersFormatted = input.workerResults.map((result) => formatWorkerForSynthesis(result, input.workerOutputBytes)).join("\n\n---\n\n");
 
   return renderTemplate(templateStr, {
+    discoveryContext: discoverySection,
     integratorName: input.lens.name,
     cwd: input.cwd,
     recentContext: recentSection,

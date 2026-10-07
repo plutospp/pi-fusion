@@ -302,6 +302,7 @@ This prompt runs on each intermediate integrator consolidating worker proposals.
   - `{{cwd}}`: Working directory of your project.
   - `{{task}}`: Your original prompt.
   - `{{integratorName}}`: Integrator index/name (e.g. `Integrator #1`, `Integrator #2`).
+  - `{{discoveryContext}}`: Context loaded and handed off by the discovery agent.
   - `{{workerOutputs}}`: Formatted worker outputs/plans to be evaluated and consolidated.
   - `{{recentContext}}`: Pre-formatted recent conversation history.
 

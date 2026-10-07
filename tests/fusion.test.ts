@@ -348,11 +348,12 @@ describe("prompts", () => {
     assert.doesNotMatch(prompt, /mapper|planner|skeptic/);
   });
 
-  it("builds integrator prompt with worker outputs and user task", () => {
+  it("builds integrator prompt with worker outputs, discovery context, and user task", () => {
     const lens = getIntegratorLens(0);
     const prompt = buildIntegratorPrompt({
       task: "Implement feature X",
       recentContext: "Recent conversation context",
+      discoveryContext: "Discovery shared context",
       workerResults: [worker({ output: "Plan for feature X" })],
       workerOutputBytes: 12_000,
       cwd: "/repo",
@@ -361,6 +362,8 @@ describe("prompts", () => {
 
     assert.equal(lens.name, "Integrator #1");
     assert.match(prompt, /integrator Integrator #1/i);
+    assert.match(prompt, /Shared discovery context/);
+    assert.match(prompt, /Discovery shared context/);
     assert.match(prompt, /Implement feature X/);
     assert.match(prompt, /Plan for feature X/);
   });

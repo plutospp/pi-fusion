@@ -869,6 +869,7 @@ export default function piFusion(pi: ExtensionAPI): void {
           const prompt = buildIntegratorPrompt({
             task,
             recentContext,
+            discoveryContext,
             workerResults,
             workerOutputBytes: settings.workerOutputBytes,
             cwd: ctx.cwd,
